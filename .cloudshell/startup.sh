@@ -1,7 +1,8 @@
 #!/bin/bash
-echo "Cloning repo..."
+echo "✅ Cloud Shell started from GitHub!"
 git clone https://github.com/wiv-ai/AzureOnBoarding.git
 cd AzureOnBoarding
+ls -la
 
 # Purpose: This script onboards a new Azure subscription to the Wiv platform by creating an App registration and assigning roles.
 
