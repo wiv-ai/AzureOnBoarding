@@ -1,13 +1,10 @@
 #!/bin/bash
-echo "✅ Cloud Shell started from GitHub!"
-git clone https://github.com/wiv-ai/AzureOnBoarding.git
-cd AzureOnBoarding
-ls -la
+
 
 # Purpose: This script onboards a new Azure subscription to the Wiv platform by creating an App registration and assigning roles.
 
 # Login to Azure
-az login
+#az login
 
 # Retrieve the current subscription ID and tenant ID
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
