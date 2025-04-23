@@ -1,4 +1,7 @@
 #!/bin/bash
+echo "Cloning repo..."
+git clone https://github.com/wiv-ai/AzureOnBoarding.git
+cd AzureOnBoarding
 
 # Purpose: This script onboards a new Azure subscription to the Wiv platform by creating an App registration and assigning roles.
 
