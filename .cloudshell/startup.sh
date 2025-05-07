@@ -7,42 +7,6 @@ echo "--------------------------------------"
 # Login to Azure (if needed)
 # az login
 
-# Fetch and list all subscriptions
-SUBSCRIPTIONS=$(az account list --query '[].{name:name, id:id}' -o tsv)
-
-echo "📦 Available Azure subscriptions:"
-echo "Name      ID"
-echo "--------  ------------------------------------"
-echo "$SUBSCRIPTIONS"
-
-# Prompt user to pick subscription
-read -p "🔹 Enter the Subscription ID to use: " SUBSCRIPTION_ID
-az account set --subscription "$SUBSCRIPTION_ID"
-
-TENANT_ID=$(az account show --query tenantId -o tsv)
-
-echo ""
-echo "✅ Now using Subscription ID: $SUBSCRIPTION_ID"
-echo "Tenant ID: $TENANT_ID"
-
-# List resource groups
-echo ""
-echo "📁 Fetching resource groups in this subscription..."
-RG_LIST=$(az group list --query "[].name" -o tsv)
-echo "$RG_LIST"
-
-read -p "🔹 Enter the Resource Group to use: " RESOURCE_GROUP
-echo "🔍 Checking if resource group '$RESOURCE_GROUP' exists..."
-az group show --name "$RESOURCE_GROUP" &>/dev/null
-
-if [ $? -ne 0 ]; then
-  echo "❌ Resource group '$RESOURCE_GROUP' does not exist. Exiting..."
-  exit 1
-fi
-
-REGION=$(az group show --name "$RESOURCE_GROUP" --query location -o tsv)
-echo "🌍 Using region: $REGION"
-
 # App registration and service principal
 APP_DISPLAY_NAME="wiv_account"
 echo ""
@@ -57,6 +21,10 @@ else
   echo "✅ Service principal exists. App ID: $APP_ID"
 fi
 
+# Get Tenant ID
+TENANT_ID=$(az account show --query tenantId -o tsv)
+echo "Tenant ID: $TENANT_ID"
+
 # Create client secret
 echo ""
 echo "🔑 Creating client secret..."
@@ -67,11 +35,24 @@ else
 fi
 CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
 
-# Assign roles
+# Assign roles to all subscriptions
 echo ""
-echo "🔒 Assigning roles..."
-az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$SUBSCRIPTION_ID"
-az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$SUBSCRIPTION_ID"
+echo "🔒 Assigning roles to all subscriptions..."
+SUBSCRIPTIONS=$(az account list --query '[].id' -o tsv)
+
+for SUBSCRIPTION_ID in $SUBSCRIPTIONS; do
+  echo "Processing subscription: $SUBSCRIPTION_ID"
+
+  # Assign Cost Management Reader role
+  echo "  - Assigning Cost Management Reader..."
+  az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$SUBSCRIPTION_ID"
+
+  # Assign Monitoring Reader role
+  echo "  - Assigning Monitoring Reader..."
+  az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$SUBSCRIPTION_ID"
+
+  echo "  ✅ Done with subscription: $SUBSCRIPTION_ID"
+done
 
 # Optional: Microsoft Graph permissions
 echo ""
@@ -105,12 +86,10 @@ fi
 
 # Final output
 echo ""
-echo "✅ Onboarding Complete"
+echo "✅ Multi-Subscription Role Assignment Complete"
 echo "--------------------------------------"
-echo "📄 Subscription ID:     $SUBSCRIPTION_ID"
 echo "📄 Tenant ID:           $TENANT_ID"
-echo "📄 Resource Group:      $RESOURCE_GROUP"
-echo "📄 Region:              $REGION"
-echo "📄 App Display Name:    $APP_DISPLAY_NAME"
 echo "📄 App (Client) ID:     $APP_ID"
 echo "📄 Client Secret:       $CLIENT_SECRET"
+echo "📄 Assigned Roles:      Cost Management Reader, Monitoring Reader"
+echo "📄 Scope:               All subscriptions"
