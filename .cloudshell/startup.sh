@@ -7,6 +7,22 @@ echo "--------------------------------------"
 # Login to Azure (if needed)
 # az login
 
+# Fetch and list all subscriptions
+SUBSCRIPTIONS=$(az account list --query '[].{name:name, id:id}' -o tsv)
+
+echo "📦 Available Azure subscriptions:"
+echo "Name      ID"
+echo "--------  ------------------------------------"
+echo "$SUBSCRIPTIONS"
+
+# Prompt user to pick subscription for creating the app
+read -p "🔹 Enter the Subscription ID to use for creating the application: " APP_SUBSCRIPTION_ID
+az account set --subscription "$APP_SUBSCRIPTION_ID"
+
+# Get Tenant ID
+TENANT_ID=$(az account show --query tenantId -o tsv)
+echo "Tenant ID: $TENANT_ID"
+
 # App registration and service principal
 APP_DISPLAY_NAME="wiv_account"
 echo ""
@@ -21,10 +37,6 @@ else
   echo "✅ Service principal exists. App ID: $APP_ID"
 fi
 
-# Get Tenant ID
-TENANT_ID=$(az account show --query tenantId -o tsv)
-echo "Tenant ID: $TENANT_ID"
-
 # Create client secret
 echo ""
 echo "🔑 Creating client secret..."
@@ -37,19 +49,33 @@ CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE"
 
 # Assign roles to all subscriptions
 echo ""
-echo "🔒 Assigning roles to all subscriptions..."
-SUBSCRIPTIONS=$(az account list --query '[].id' -o tsv)
+echo "🔒 Do you want to assign roles to all subscriptions or only specific ones? (all/specific): "
+read SCOPE_CHOICE
 
-for SUBSCRIPTION_ID in $SUBSCRIPTIONS; do
+if [[ "$SCOPE_CHOICE" =~ ^[Aa]ll$ ]]; then
+  echo "🔒 Assigning roles to all subscriptions..."
+  SUBSCRIPTIONS_TO_PROCESS=$(az account list --query '[].id' -o tsv)
+else
+  echo "🔒 Enter comma-separated list of subscription IDs to assign roles to (or press Enter to use the same subscription): "
+  read SPECIFIC_SUBSCRIPTIONS
+
+  if [ -z "$SPECIFIC_SUBSCRIPTIONS" ]; then
+    SUBSCRIPTIONS_TO_PROCESS="$APP_SUBSCRIPTION_ID"
+  else
+    SUBSCRIPTIONS_TO_PROCESS=$(echo $SPECIFIC_SUBSCRIPTIONS | tr ',' ' ')
+  fi
+fi
+
+for SUBSCRIPTION_ID in $SUBSCRIPTIONS_TO_PROCESS; do
   echo "Processing subscription: $SUBSCRIPTION_ID"
 
   # Assign Cost Management Reader role
   echo "  - Assigning Cost Management Reader..."
-  az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$SUBSCRIPTION_ID"
+  az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$SUBSCRIPTION_ID" --only-show-errors
 
   # Assign Monitoring Reader role
   echo "  - Assigning Monitoring Reader..."
-  az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$SUBSCRIPTION_ID"
+  az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$SUBSCRIPTION_ID" --only-show-errors
 
   echo "  ✅ Done with subscription: $SUBSCRIPTION_ID"
 done
@@ -86,10 +112,14 @@ fi
 
 # Final output
 echo ""
-echo "✅ Multi-Subscription Role Assignment Complete"
+echo "✅ Azure Onboarding Complete"
 echo "--------------------------------------"
 echo "📄 Tenant ID:           $TENANT_ID"
 echo "📄 App (Client) ID:     $APP_ID"
 echo "📄 Client Secret:       $CLIENT_SECRET"
 echo "📄 Assigned Roles:      Cost Management Reader, Monitoring Reader"
-echo "📄 Scope:               All subscriptions"
+if [[ "$SCOPE_CHOICE" =~ ^[Aa]ll$ ]]; then
+  echo "📄 Scope:               All subscriptions"
+else
+  echo "📄 Scope:               Specific subscriptions"
+fi
