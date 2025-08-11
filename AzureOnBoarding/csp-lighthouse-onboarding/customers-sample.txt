@@ -1,0 +1,16 @@
+# Sample customers file for CSP Lighthouse onboarding
+# Format: CustomerName[TAB]TenantID
+# Lines starting with # are ignored
+# Replace with actual customer data from Partner Center
+
+# Example customers (replace with real data)
+Contoso Corporation	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+Fabrikam Inc	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+Adventure Works	cccccccc-cccc-cccc-cccc-cccccccccccc
+Tailwind Traders	dddddddd-dddd-dddd-dddd-dddddddddddd
+Northwind Systems	eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee
+
+# To populate this file with real data:
+# 1. Export customer list from Partner Center
+# 2. Format as: CustomerName[TAB]TenantID
+# 3. Save as customers.txt (not customers-sample.txt)

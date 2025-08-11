@@ -1,0 +1,29 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "mspOfferName": {
+            "value": "WIV Platform Monitoring Access"
+        },
+        "mspOfferDescription": {
+            "value": "Provides Cost Management Reader and Monitoring Reader access for WIV Platform SaaS monitoring and cost optimization"
+        },
+        "managedByTenantId": {
+            "value": "YOUR_CSP_TENANT_ID_HERE"
+        },
+        "authorizations": {
+            "value": [
+                {
+                    "principalId": "YOUR_SERVICE_PRINCIPAL_OBJECT_ID_HERE",
+                    "principalIdDisplayName": "WIV Platform Service Principal",
+                    "roleDefinitionId": "72fafb9e-0641-4937-9268-a91bfd8191a3"
+                },
+                {
+                    "principalId": "YOUR_SERVICE_PRINCIPAL_OBJECT_ID_HERE",
+                    "principalIdDisplayName": "WIV Platform Service Principal",
+                    "roleDefinitionId": "43d0d8ad-25c7-4714-9337-8ba259a9fe05"
+                }
+            ]
+        }
+    }
+}

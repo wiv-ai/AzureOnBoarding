@@ -1,0 +1,90 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-08-01/subscriptionDeploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "mspOfferName": {
+            "type": "string",
+            "defaultValue": "WIV Platform Monitoring Access",
+            "metadata": {
+                "description": "The name of the Managed Service Provider offer"
+            }
+        },
+        "mspOfferDescription": {
+            "type": "string",
+            "defaultValue": "Provides Cost Management Reader and Monitoring Reader access for WIV Platform SaaS monitoring and cost optimization",
+            "metadata": {
+                "description": "Description of the Managed Service Provider offer"
+            }
+        },
+        "managedByTenantId": {
+            "type": "string",
+            "metadata": {
+                "description": "The tenant ID of the Managed Service Provider (CSP tenant)"
+            }
+        },
+        "authorizations": {
+            "type": "array",
+            "metadata": {
+                "description": "Array of authorization objects containing principalId, roleDefinitionId, and principalIdDisplayName"
+            }
+        },
+        "eligibleAuthorizations": {
+            "type": "array",
+            "defaultValue": [],
+            "metadata": {
+                "description": "Optional array of eligible authorization objects for JIT access"
+            }
+        }
+    },
+    "variables": {
+        "mspRegistrationName": "[guid(parameters('mspOfferName'), parameters('managedByTenantId'))]",
+        "mspAssignmentName": "[guid(parameters('mspOfferName'), parameters('managedByTenantId'), subscription().subscriptionId)]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.ManagedServices/registrationDefinitions",
+            "apiVersion": "2022-10-01",
+            "name": "[variables('mspRegistrationName')]",
+            "properties": {
+                "registrationDefinitionName": "[parameters('mspOfferName')]",
+                "description": "[parameters('mspOfferDescription')]",
+                "managedByTenantId": "[parameters('managedByTenantId')]",
+                "authorizations": "[parameters('authorizations')]",
+                "eligibleAuthorizations": "[parameters('eligibleAuthorizations')]"
+            }
+        },
+        {
+            "type": "Microsoft.ManagedServices/registrationAssignments",
+            "apiVersion": "2022-10-01",
+            "name": "[variables('mspAssignmentName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
+            ],
+            "properties": {
+                "registrationDefinitionId": "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
+            }
+        }
+    ],
+    "outputs": {
+        "mspOfferName": {
+            "type": "string",
+            "value": "[parameters('mspOfferName')]"
+        },
+        "authorizations": {
+            "type": "array",
+            "value": "[parameters('authorizations')]"
+        },
+        "managedByTenantId": {
+            "type": "string",
+            "value": "[parameters('managedByTenantId')]"
+        },
+        "registrationDefinitionId": {
+            "type": "string",
+            "value": "[resourceId('Microsoft.ManagedServices/registrationDefinitions/', variables('mspRegistrationName'))]"
+        },
+        "registrationAssignmentId": {
+            "type": "string",
+            "value": "[resourceId('Microsoft.ManagedServices/registrationAssignments/', variables('mspAssignmentName'))]"
+        }
+    }
+}

@@ -1,0 +1,58 @@
+{
+    "roleDefinitions": {
+        "Cost Management Reader": {
+            "id": "72fafb9e-0641-4937-9268-a91bfd8191a3",
+            "description": "Can view cost data and configuration"
+        },
+        "Monitoring Reader": {
+            "id": "43d0d8ad-25c7-4714-9337-8ba259a9fe05",
+            "description": "Can read monitoring data and settings"
+        },
+        "Reader": {
+            "id": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+            "description": "Can view everything, but can't make changes"
+        },
+        "Log Analytics Reader": {
+            "id": "73c42c96-874c-492b-b04d-ab87d138a893",
+            "description": "Can read Log Analytics data"
+        },
+        "Security Reader": {
+            "id": "39bc4728-0917-49c7-9d2c-d95423bc2eb4",
+            "description": "Can view security policies, states, and recommendations"
+        },
+        "Billing Reader": {
+            "id": "fa23ad8b-c56e-40d8-ac0c-ce449e1d2c64",
+            "description": "Can read billing data"
+        },
+        "Support Request Contributor": {
+            "id": "cfd33db0-3dd1-45e3-aa9d-cdbdf3b6f24e",
+            "description": "Can create and manage support requests"
+        },
+        "Tag Contributor": {
+            "id": "4a9ae827-6dc8-4573-8ac7-8239d42aa03f",
+            "description": "Can manage tags on entities"
+        },
+        "Resource Policy Contributor": {
+            "id": "36243c78-bf99-498c-9df9-86d9f8d28608",
+            "description": "Can create and manage resource policies"
+        },
+        "Managed Services Registration Assignment Delete Role": {
+            "id": "91c1777a-f3dc-4fae-b103-61d183457e46",
+            "description": "Allows managing tenant users to delete registration assignments"
+        }
+    },
+    "usage": {
+        "description": "Use these role definition IDs in your Lighthouse templates",
+        "example": {
+            "principalId": "your-service-principal-object-id",
+            "principalIdDisplayName": "Your Service Principal Name",
+            "roleDefinitionId": "72fafb9e-0641-4937-9268-a91bfd8191a3"
+        },
+        "notes": [
+            "These are built-in Azure role definition IDs",
+            "They are the same across all Azure tenants",
+            "You can combine multiple roles for the same principal",
+            "For custom roles, use the custom role definition ID from your tenant"
+        ]
+    }
+}
