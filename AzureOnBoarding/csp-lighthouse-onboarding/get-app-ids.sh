@@ -3,8 +3,9 @@
 #################################################################################
 # get-app-ids.sh
 # 
-# Purpose: Fetch all relevant IDs for your Azure AD application and service principal
+# Purpose: Fetch all relevant IDs for your existing Azure AD application and service principal
 #          Run this in your CSP (managing) tenant to get the IDs needed for Lighthouse
+#          This script is READ-ONLY and will not create or modify anything
 #
 # Usage: ./get-app-ids.sh [app-name]
 #        If no app name provided, defaults to "wiv_account"
@@ -24,6 +25,7 @@ APP_NAME="${1:-wiv_account}"
 
 echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}     Azure AD Application & Service Principal ID Fetcher${NC}"
+echo -e "${BLUE}                        (Read-Only Mode)${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
 echo ""
 
@@ -52,21 +54,9 @@ APP_EXISTS=$(az ad app list --display-name "$APP_NAME" --query "[0].appId" -o ts
 if [ -z "$APP_EXISTS" ]; then
     echo -e "${RED}✗ Application '$APP_NAME' not found in this tenant${NC}"
     echo ""
-    echo "Would you like to create it? (y/n)"
-    read -r CREATE_APP
-    
-    if [[ "$CREATE_APP" =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}Creating application...${NC}"
-        APP_ID=$(az ad app create --display-name "$APP_NAME" --query appId -o tsv)
-        echo -e "${GREEN}✓ Application created${NC}"
-        
-        echo -e "${YELLOW}Creating service principal...${NC}"
-        SP_OBJECT_ID=$(az ad sp create --id "$APP_ID" --query id -o tsv)
-        echo -e "${GREEN}✓ Service principal created${NC}"
-    else
-        echo "Exiting..."
-        exit 1
-    fi
+    echo -e "${YELLOW}Please ensure the application exists before running this script.${NC}"
+    echo -e "${YELLOW}To create it, use your existing startup.sh script or create manually in Azure Portal.${NC}"
+    exit 1
 else
     echo -e "${GREEN}✓ Application found${NC}"
 fi
@@ -79,6 +69,7 @@ if [ -n "$APP_ID" ]; then
     echo -e "${GREEN}✓ Application (Client) ID:${NC} $APP_ID"
 else
     echo -e "${RED}✗ Could not fetch Application ID${NC}"
+    exit 1
 fi
 
 # Get App Registration Object ID
@@ -99,10 +90,10 @@ if [ -n "$SP_OBJECT_ID" ]; then
     echo -e "${GREEN}✓ Service Principal Object ID:${NC} ${BLUE}$SP_OBJECT_ID${NC} ⭐"
     echo -e "  ${YELLOW}(This is the ID you need for Lighthouse deployments!)${NC}"
 else
-    echo -e "${RED}✗ Could not fetch Service Principal Object ID${NC}"
-    echo -e "${YELLOW}  Creating service principal...${NC}"
-    SP_OBJECT_ID=$(az ad sp create --id "$APP_ID" --query id -o tsv)
-    echo -e "${GREEN}✓ Service Principal created with Object ID:${NC} $SP_OBJECT_ID"
+    echo -e "${RED}✗ Service Principal not found for this application${NC}"
+    echo -e "${YELLOW}  The service principal may not exist yet.${NC}"
+    echo -e "${YELLOW}  To create it, run: az ad sp create --id $APP_ID${NC}"
+    exit 1
 fi
 
 # Get Service Principal Enterprise Object ID (same as above, different query)
@@ -120,7 +111,16 @@ fi
 echo ""
 echo -e "${YELLOW}Checking for existing client secrets...${NC}"
 SECRET_COUNT=$(az ad app credential list --id "$APP_ID" --query "length(@)" -o tsv)
-echo -e "${GREEN}✓ Found ${SECRET_COUNT} existing secret(s)${NC}"
+if [ "$SECRET_COUNT" -gt 0 ]; then
+    echo -e "${GREEN}✓ Found ${SECRET_COUNT} existing secret(s)${NC}"
+    
+    # Show secret expiration dates
+    echo -e "${YELLOW}  Secret expiration dates:${NC}"
+    az ad app credential list --id "$APP_ID" --query "[].{Description:displayName, Expires:endDateTime}" -o table
+else
+    echo -e "${YELLOW}⚠ No client secrets found${NC}"
+    echo -e "${YELLOW}  You may need to create one if using client secret authentication${NC}"
+fi
 
 # Export to environment variables file
 echo ""
