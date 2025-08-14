@@ -429,41 +429,275 @@ else
     SAS_TOKEN=""
 fi
 
-# Save Synapse setup script
+# Automated Synapse Database Setup
+echo ""
+echo "🔧 Setting up Synapse database and views automatically..."
+
+# Generate a secure password for master key
+MASTER_KEY_PASSWORD="StrongP@ssw0rd$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)!"
+
+# Execute SQL commands in Synapse using Azure CLI
+echo "Creating BillingAnalytics database..."
+
+# Create database
+az synapse sql script create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --name "CreateBillingDatabase" \
+    --file-path /dev/stdin \
+    --only-show-errors <<EOF
+CREATE DATABASE IF NOT EXISTS BillingAnalytics
+EOF
+
+# Wait for database creation
+sleep 5
+
+# Create and execute the setup script
+echo "Setting up database objects..."
+
+# Since Azure CLI doesn't support direct SQL execution on serverless pools,
+# we'll use a Python script to automate this
+cat > setup_synapse_automated.py <<'PYTHON_EOF'
+#!/usr/bin/env python3
+import pyodbc
+import sys
+import time
+
+# Configuration from environment
+config = {
+    'workspace_name': '$SYNAPSE_WORKSPACE',
+    'tenant_id': '$TENANT_ID',
+    'client_id': '$APP_ID', 
+    'client_secret': '$CLIENT_SECRET',
+    'storage_account': '$STORAGE_ACCOUNT_NAME',
+    'container': '$CONTAINER_NAME',
+    'sas_token': '$SAS_TOKEN',
+    'master_key_password': '$MASTER_KEY_PASSWORD'
+}
+
+def execute_sql_commands(conn_str, commands):
+    """Execute SQL commands one by one"""
+    try:
+        conn = pyodbc.connect(conn_str, autocommit=True)
+        cursor = conn.cursor()
+        
+        for i, command in enumerate(commands, 1):
+            if command.strip():
+                try:
+                    print(f"Executing step {i}...")
+                    cursor.execute(command)
+                    print(f"✅ Step {i} completed")
+                except pyodbc.Error as e:
+                    if "already exists" in str(e) or "Cannot drop" in str(e):
+                        print(f"⚠️  Step {i}: Object already exists (skipping)")
+                    else:
+                        print(f"❌ Step {i} failed: {e}")
+                        # Continue with next command
+                time.sleep(1)
+        
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        return False
+
+# Connection string for master database
+master_conn_str = f"""
+DRIVER={{ODBC Driver 18 for SQL Server}};
+SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
+DATABASE=master;
+UID={config['client_id']};
+PWD={config['client_secret']};
+Authentication=ActiveDirectoryServicePrincipal;
+Encrypt=yes;
+TrustServerCertificate=no;
+"""
+
+# Create database
+print("📦 Creating BillingAnalytics database...")
+db_commands = [
+    "CREATE DATABASE BillingAnalytics"
+]
+
+execute_sql_commands(master_conn_str, db_commands)
+
+# Connection string for BillingAnalytics database
+billing_conn_str = f"""
+DRIVER={{ODBC Driver 18 for SQL Server}};
+SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
+DATABASE=BillingAnalytics;
+UID={config['client_id']};
+PWD={config['client_secret']};
+Authentication=ActiveDirectoryServicePrincipal;
+Encrypt=yes;
+TrustServerCertificate=no;
+"""
+
+# Setup commands
+print("\n🔧 Setting up database objects...")
+setup_commands = [
+    # Create master key
+    f"CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'",
+    
+    # Drop existing credential if exists
+    """IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
+       DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential""",
+    
+    # Create credential
+    f"""CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
+        WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
+        SECRET = '{config['sas_token']}'""",
+    
+    # Drop existing data source if exists
+    """IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
+       DROP EXTERNAL DATA SOURCE BillingDataSource""",
+    
+    # Create data source
+    f"""CREATE EXTERNAL DATA SOURCE BillingDataSource
+        WITH (
+            LOCATION = 'https://{config['storage_account']}.blob.core.windows.net/{config['container']}',
+            CREDENTIAL = BillingStorageCredential
+        )""",
+    
+    # Drop existing view if exists
+    """IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData')
+       DROP VIEW BillingData""",
+    
+    # Create view
+    """CREATE VIEW BillingData AS
+       SELECT *
+       FROM OPENROWSET(
+           BULK 'billing-data/DailyBillingExport/20250801-20250831/*.csv',
+           DATA_SOURCE = 'BillingDataSource',
+           FORMAT = 'CSV',
+           PARSER_VERSION = '2.0',
+           FIRSTROW = 2
+       )
+       WITH (
+           date NVARCHAR(100),
+           serviceFamily NVARCHAR(200),
+           meterCategory NVARCHAR(200),
+           meterSubCategory NVARCHAR(200),
+           meterName NVARCHAR(500),
+           billingAccountName NVARCHAR(200),
+           costCenter NVARCHAR(100),
+           resourceGroupName NVARCHAR(200),
+           resourceLocation NVARCHAR(100),
+           consumedService NVARCHAR(200),
+           ResourceId NVARCHAR(1000),
+           chargeType NVARCHAR(100),
+           publisherType NVARCHAR(100),
+           quantity NVARCHAR(100),
+           costInBillingCurrency NVARCHAR(100),
+           costInUsd NVARCHAR(100),
+           PayGPrice NVARCHAR(100),
+           billingCurrency NVARCHAR(10),
+           subscriptionName NVARCHAR(200),
+           SubscriptionId NVARCHAR(100),
+           ProductName NVARCHAR(500),
+           frequency NVARCHAR(100),
+           unitOfMeasure NVARCHAR(100),
+           tags NVARCHAR(4000)
+       ) AS BillingData"""
+]
+
+if execute_sql_commands(billing_conn_str, setup_commands):
+    print("\n✅ Synapse database setup completed successfully!")
+    
+    # Test the view
+    print("\n🔍 Testing the view...")
+    try:
+        conn = pyodbc.connect(billing_conn_str)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as RecordCount FROM BillingData")
+        row = cursor.fetchone()
+        print(f"✅ View is working! Found {row[0]} billing records")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️  Could not test view: {e}")
+else:
+    print("\n❌ Some steps failed, but setup may still be usable")
+
+print("\n📊 You can now query billing data using:")
+print("   SELECT * FROM BillingAnalytics.dbo.BillingData")
+PYTHON_EOF
+
+# Check if Python and pyodbc are available
+if command -v python3 >/dev/null 2>&1; then
+    # Check for pyodbc
+    if ! python3 -c "import pyodbc" 2>/dev/null; then
+        echo "📦 Installing pyodbc for automated setup..."
+        # Try to install pyodbc and dependencies
+        if command -v apt-get >/dev/null 2>&1; then
+            # Debian/Ubuntu
+            sudo apt-get update >/dev/null 2>&1
+            sudo apt-get install -y unixodbc-dev >/dev/null 2>&1
+            
+            # Install Microsoft ODBC Driver
+            if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" >/dev/null 2>&1; then
+                curl https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg 2>/dev/null
+                curl -s https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs 2>/dev/null || echo "22.04")/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+                sudo apt-get update >/dev/null 2>&1
+                sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 >/dev/null 2>&1
+            fi
+        elif command -v yum >/dev/null 2>&1; then
+            # RHEL/CentOS
+            sudo yum install -y unixODBC-devel >/dev/null 2>&1
+        fi
+        
+        # Install pyodbc
+        pip3 install pyodbc --quiet 2>/dev/null || pip install pyodbc --quiet 2>/dev/null || sudo pip3 install pyodbc --quiet 2>/dev/null
+    fi
+    
+    # Try to run the automated setup
+    if python3 -c "import pyodbc" 2>/dev/null; then
+        echo "🚀 Running automated Synapse setup..."
+        # Replace variables in Python script
+        sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
+        sed -i "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
+        sed -i "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
+        sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
+        sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
+        sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
+        sed -i "s/\$SAS_TOKEN/$SAS_TOKEN/g" setup_synapse_automated.py
+        sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
+        
+        python3 setup_synapse_automated.py
+        rm -f setup_synapse_automated.py
+    else
+        echo "⚠️  Could not install pyodbc automatically"
+        echo "   Manual setup script saved to: synapse_billing_setup.sql"
+        echo "   To install manually: pip install pyodbc"
+    fi
+else
+    echo "⚠️  Python not available for automated setup"
+    echo "   Manual setup script saved to: synapse_billing_setup.sql"
+fi
+
+# Save manual setup script as backup
 cat > synapse_billing_setup.sql <<EOF
 -- ========================================================
--- SYNAPSE BILLING DATA SETUP
+-- SYNAPSE BILLING DATA SETUP (Manual Backup)
 -- ========================================================
 -- Auto-generated on: $(date)
+-- This is a backup if automated setup fails
 -- Run this in Synapse Studio connected to Built-in serverless SQL pool
 -- Workspace: $SYNAPSE_WORKSPACE
 -- Storage Account: $STORAGE_ACCOUNT_NAME
 -- Container: $CONTAINER_NAME
 
--- Step 1: Create database
 CREATE DATABASE BillingAnalytics;
 GO
-
 USE BillingAnalytics;
 GO
 
--- Step 2: Create master key (if not exists)
-CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd\$(openssl rand -hex 4)!';
-GO
-
--- Step 3: Create database scoped credential with SAS token
-IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
-    DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential;
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
 GO
 
 CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
 WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
 SECRET = '$SAS_TOKEN';
-GO
-
--- Step 4: Create external data source
-IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
-    DROP EXTERNAL DATA SOURCE BillingDataSource;
 GO
 
 CREATE EXTERNAL DATA SOURCE BillingDataSource
@@ -473,15 +707,10 @@ WITH (
 );
 GO
 
--- Step 5: Create view for billing data
-IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData')
-    DROP VIEW BillingData;
-GO
-
 CREATE VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
-    BULK 'billing-data/DailyBillingExport/*/*.csv',
+    BULK 'billing-data/DailyBillingExport/20250801-20250831/*.csv',
     DATA_SOURCE = 'BillingDataSource',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
@@ -514,12 +743,9 @@ WITH (
     tags NVARCHAR(4000)
 ) AS BillingData;
 GO
-
--- Test query
-SELECT TOP 10 * FROM BillingData;
 EOF
 
-echo "✅ Synapse setup script saved to: synapse_billing_setup.sql"
+echo "✅ Manual backup script saved to: synapse_billing_setup.sql"
 
 # Save Python remote query client configuration
 cat > synapse_config.py <<EOF
