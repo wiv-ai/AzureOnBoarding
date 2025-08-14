@@ -48,8 +48,8 @@ if [ -z "$APP_ID" ]; then
 else
   echo "✅ Service principal already exists. App ID: $APP_ID"
   echo "⏭️  Skipping app creation and client secret generation..."
-  CLIENT_SECRET=""
-  echo "ℹ️  Note: Client secret not available. Remote access features will require manual configuration."
+  CLIENT_SECRET="<EXISTING_CLIENT_SECRET_REQUIRED>"
+  echo "ℹ️  Note: You'll need to manually update the client secret in generated scripts for remote access."
 fi
 
 # Assign roles to all subscriptions
