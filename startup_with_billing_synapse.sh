@@ -592,37 +592,7 @@ def wait_for_synapse():
     
     return False
 
-def execute_sql_commands(conn_str, commands):
-    """Execute SQL commands one by one"""
-    try:
-        # Add connection timeout
-        conn_str_with_timeout = conn_str.replace(
-            'TrustServerCertificate=no;',
-            'TrustServerCertificate=no;Connection Timeout=60;'
-        )
-        conn = pyodbc.connect(conn_str_with_timeout, autocommit=True)
-        cursor = conn.cursor()
-        
-        for i, command in enumerate(commands, 1):
-            if command.strip():
-                try:
-                    print(f"Executing step {i}...")
-                    cursor.execute(command)
-                    print(f"✅ Step {i} completed")
-                except pyodbc.Error as e:
-                    if "already exists" in str(e) or "Cannot drop" in str(e):
-                        print(f"⚠️  Step {i}: Object already exists (skipping)")
-                    else:
-                        print(f"❌ Step {i} failed: {e}")
-                        # Continue with next command
-                time.sleep(1)
-        
-        cursor.close()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Connection failed: {e}")
-        return False
+# Function removed - inline execution is used instead for better error handling
 
 # First wait for Synapse to be ready
 if not wait_for_synapse():
@@ -1134,20 +1104,23 @@ echo "✅ Billing data access is ready!"
 echo "📊 The queries in 'billing_queries.sql' can be run directly in Synapse Studio"
 echo "   No additional setup needed - serverless SQL pool can query the CSV files directly!"
 
-# Optional: Trigger the first export run
+# Automatically trigger the first export run
 echo ""
-read -p "Do you want to trigger the billing export to run now? (y/n): " TRIGGER_EXPORT
+echo "🔄 Automatically triggering billing export to run immediately..."
+EXPORT_TRIGGER_RESULT=$(az rest --method POST \
+    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2021-10-01" \
+    --only-show-errors 2>&1)
 
-if [[ "$TRIGGER_EXPORT" =~ ^[Yy]$ ]]; then
-    echo "🔄 Triggering billing export..."
-    az rest --method POST \
-        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2021-10-01" \
-        --only-show-errors
-    
-    echo "✅ Export triggered. Data will be available in the storage account soon."
-    echo "   Check: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME/billing-data/"
+if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]] || [[ "$EXPORT_TRIGGER_RESULT" == *"Error"* ]]; then
+    echo "⚠️  Could not trigger export immediately"
+    echo "   This is normal if an export is already running"
+    echo "   Export will run automatically at midnight UTC daily"
 else
-    echo "ℹ️  Export will run on its daily schedule."
+    echo "✅ Billing export triggered successfully!"
+    echo "   📊 Data will be available in 5-30 minutes at:"
+    echo "      Storage: $STORAGE_ACCOUNT_NAME"
+    echo "      Container: $CONTAINER_NAME/billing-data/"
+    echo "   ⏰ Future exports will run automatically every day at midnight UTC"
 fi
 
 # Optional: Microsoft Graph permissions
