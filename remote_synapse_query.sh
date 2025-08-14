@@ -13,8 +13,10 @@ CONTAINER="billing-exports"
 SUBSCRIPTION_ID="62b32106-4b98-47ea-9ac5-4181f33ae2af"
 RESOURCE_GROUP="wiv-rg"
 
-# The actual file path from the error message
-ACTUAL_FILE_PATH="billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv"
+# File paths - using wildcards for flexibility
+SPECIFIC_FILE_PATH="billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv"
+WILDCARD_FILE_PATH="billing-data/DailyBillingExport/*/DailyBillingExport*.csv"
+WILDCARD_PATTERN="billing-data/DailyBillingExport/"
 
 # Login with service principal
 echo "🔐 Logging in with service principal..."
@@ -61,54 +63,33 @@ else
     echo "⚠️  No explicit storage account roles found (may have inherited permissions)"
 fi
 
-# Test 2: Check if the specific file exists
+# Test 2: Check if files exist with wildcard pattern
 echo ""
-echo "📂 Checking for the specific billing file..."
-echo "Looking for: $ACTUAL_FILE_PATH"
+echo "📂 Checking for billing files with wildcard pattern..."
+echo "Pattern: $WILDCARD_PATTERN"
 
-FILE_EXISTS=$(az storage blob exists \
+FILE_COUNT=$(az storage blob list \
     --account-name "$STORAGE_ACCOUNT" \
     --container-name "$CONTAINER" \
-    --name "$ACTUAL_FILE_PATH" \
+    --prefix "$WILDCARD_PATTERN" \
     --auth-mode login \
-    --query exists \
+    --query "length(@)" \
     --output tsv 2>/dev/null)
 
-if [ "$FILE_EXISTS" == "true" ]; then
-    echo "✅ File exists in storage"
+if [ -n "$FILE_COUNT" ] && [ "$FILE_COUNT" -gt 0 ]; then
+    echo "✅ Found $FILE_COUNT billing export files"
     
-    # Get file properties
-    FILE_SIZE=$(az storage blob show \
+    # List the files
+    echo "Files matching pattern:"
+    az storage blob list \
         --account-name "$STORAGE_ACCOUNT" \
         --container-name "$CONTAINER" \
-        --name "$ACTUAL_FILE_PATH" \
+        --prefix "$WILDCARD_PATTERN" \
         --auth-mode login \
-        --query "properties.contentLength" \
-        --output tsv 2>/dev/null)
-    
-    if [ -n "$FILE_SIZE" ]; then
-        echo "File size: $FILE_SIZE bytes"
-    fi
+        --query "[].{name:name, size:properties.contentLength}" \
+        --output table 2>/dev/null | head -10
 else
-    echo "⚠️  File not found or no access"
-    
-    # Try to list files in the directory
-    echo ""
-    echo "Attempting to list files in the billing-data directory..."
-    FILE_LIST=$(az storage blob list \
-        --account-name "$STORAGE_ACCOUNT" \
-        --container-name "$CONTAINER" \
-        --prefix "billing-data/DailyBillingExport" \
-        --auth-mode login \
-        --query "[].name" \
-        --output table 2>/dev/null)
-    
-    if [ -n "$FILE_LIST" ]; then
-        echo "Files found:"
-        echo "$FILE_LIST"
-    else
-        echo "Could not list files - may be a permission issue"
-    fi
+    echo "⚠️  No files found with wildcard pattern"
 fi
 
 # Test 3: Check Synapse workspace access
@@ -137,18 +118,23 @@ else
     echo "⚠️  Cannot access Synapse workspace"
 fi
 
-# Test 4: Generate working queries
+# Test 4: Generate working queries with wildcards
 echo ""
-echo "📊 Generating validated Synapse queries..."
+echo "📊 Generating validated Synapse queries with wildcards..."
 
-cat > validated_query.sql <<'EOF'
--- IMPORTANT: Use this query in Synapse Studio
+cat > validated_wildcard_query.sql <<'EOF'
+-- IMPORTANT: Use these queries in Synapse Studio
 -- Connect to: Built-in (serverless SQL pool)
 
--- Query 1: Test with exact file path
-SELECT TOP 10 *
+-- ============================================
+-- WILDCARD QUERIES (Recommended for Production)
+-- ============================================
+
+-- Query 1: Get latest billing data using wildcards
+-- This will automatically pick up new daily exports
+SELECT TOP 100 *
 FROM OPENROWSET(
-    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/*/DailyBillingExport*.csv',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     FIRSTROW = 2
@@ -178,19 +164,80 @@ WITH (
     Frequency NVARCHAR(50),
     UnitOfMeasure NVARCHAR(50),
     Tags NVARCHAR(MAX)
-) AS BillingData;
+) AS BillingData
+ORDER BY Date DESC;
 
--- Query 2: If you need to use credentials
--- First create a credential (run once):
-/*
-CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
-WITH IDENTITY = 'Managed Identity';
+-- Query 2: Get billing summary by service (all files)
+SELECT 
+    ServiceFamily,
+    ResourceGroup,
+    COUNT(*) as RecordCount,
+    SUM(TRY_CAST(CostInUSD as FLOAT)) as TotalCost,
+    MIN(Date) as FirstDate,
+    MAX(Date) as LastDate
+FROM OPENROWSET(
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/*/DailyBillingExport*.csv',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    Date NVARCHAR(100),
+    ServiceFamily NVARCHAR(100),
+    ResourceGroup NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
+) AS BillingData
+GROUP BY ServiceFamily, ResourceGroup
+ORDER BY TotalCost DESC;
 
--- Then query with credential:
+-- Query 3: Daily cost trend (using wildcards)
+SELECT 
+    Date,
+    COUNT(*) as TransactionCount,
+    SUM(TRY_CAST(CostInUSD as FLOAT)) as DailyCost
+FROM OPENROWSET(
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/*/DailyBillingExport*.csv',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    Date NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
+) AS BillingData
+GROUP BY Date
+ORDER BY Date DESC;
+
+-- Query 4: Top 10 most expensive resources (all time)
+SELECT TOP 10
+    ResourceId,
+    ResourceGroup,
+    ServiceFamily,
+    SUM(TRY_CAST(CostInUSD as FLOAT)) as TotalCost
+FROM OPENROWSET(
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/*/DailyBillingExport*.csv',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    ResourceId NVARCHAR(500),
+    ResourceGroup NVARCHAR(100),
+    ServiceFamily NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
+) AS BillingData
+WHERE ResourceId IS NOT NULL
+GROUP BY ResourceId, ResourceGroup, ServiceFamily
+ORDER BY TotalCost DESC;
+
+-- ============================================
+-- SPECIFIC FILE QUERY (for testing)
+-- ============================================
+
+-- Query 5: Specific file (if you need to query a particular export)
 SELECT TOP 10 *
 FROM OPENROWSET(
     BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
-    DATA_SOURCE = 'BillingStorage',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     FIRSTROW = 2
@@ -201,10 +248,9 @@ WITH (
     ResourceGroup NVARCHAR(100),
     CostInUSD NVARCHAR(50)
 ) AS BillingData;
-*/
 EOF
 
-echo "✅ Query saved to validated_query.sql"
+echo "✅ Wildcard queries saved to validated_wildcard_query.sql"
 
 # Test 5: Attempt direct query execution via REST API
 echo ""
@@ -251,7 +297,7 @@ echo "✅ Storage Account: $STORAGE_ACCOUNT"
 echo "✅ Synapse Workspace: $SYNAPSE_WORKSPACE"
 echo ""
 echo "📁 Target File:"
-echo "   $ACTUAL_FILE_PATH"
+echo "   $SPECIFIC_FILE_PATH"
 echo ""
 echo "🔧 TROUBLESHOOTING STEPS:"
 echo ""
@@ -267,7 +313,7 @@ echo "3. To run queries:"
 echo "   a. Open https://web.azuresynapse.net"
 echo "   b. Select workspace: $SYNAPSE_WORKSPACE"
 echo "   c. Use 'Built-in' serverless SQL pool"
-echo "   d. Run the query from validated_query.sql"
+echo "   d. Run the query from validated_wildcard_query.sql"
 echo ""
 echo "4. If file access fails, check:"
 echo "   - File exists at the exact path"
