@@ -100,9 +100,8 @@ echo ""
 echo "💰 Configuring Azure Cost Management Billing Export..."
 echo "--------------------------------------"
 
-# Prompt for resource group
-read -p "🔹 Enter Resource Group name for billing resources (or press Enter for 'rg-billing-export'): " BILLING_RG
-BILLING_RG=${BILLING_RG:-"rg-billing-export"}
+# Use fixed resource group name
+BILLING_RG="wiv-rg"
 
 # Check if resource group exists and get its location
 echo "📁 Checking resource group '$BILLING_RG'..."
@@ -111,27 +110,11 @@ RG_EXISTS=$(az group exists --name "$BILLING_RG")
 if [ "$RG_EXISTS" = "true" ]; then
     # Resource group exists, get its location
     AZURE_REGION=$(az group show --name "$BILLING_RG" --query location -o tsv)
-    echo "✅ Using existing resource group in region: $AZURE_REGION"
+    echo "✅ Using existing resource group '$BILLING_RG' in region: $AZURE_REGION"
 else
-    # Resource group doesn't exist, ask for region
-    echo "🌍 Resource group doesn't exist. Select Azure region for new resources:"
-    echo "   1. East US 2 (eastus2)"
-    echo "   2. West US 2 (westus2)"
-    echo "   3. Central US (centralus)"
-    echo "   4. North Europe (northeurope)"
-    echo "   5. West Europe (westeurope)"
-    read -p "Enter your choice (1-5) or press Enter for default (eastus2): " REGION_CHOICE
-
-    case $REGION_CHOICE in
-        1|"") AZURE_REGION="eastus2" ;;
-        2) AZURE_REGION="westus2" ;;
-        3) AZURE_REGION="centralus" ;;
-        4) AZURE_REGION="northeurope" ;;
-        5) AZURE_REGION="westeurope" ;;
-        *) AZURE_REGION="eastus2" ;;
-    esac
-
-    echo "📍 Creating resource group in region: $AZURE_REGION"
+    # Resource group doesn't exist, create it in eastus2 (or another region that supports Synapse)
+    AZURE_REGION="eastus2"
+    echo "📍 Creating resource group '$BILLING_RG' in region: $AZURE_REGION"
     az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
 fi
 
@@ -240,9 +223,8 @@ echo ""
 echo "🔷 Setting up Azure Synapse Analytics Workspace..."
 echo "--------------------------------------"
 
-# Prompt for Synapse workspace name
-read -p "🔹 Enter Synapse workspace name (or press Enter for 'wiv-synapse-billing'): " SYNAPSE_WORKSPACE
-SYNAPSE_WORKSPACE=${SYNAPSE_WORKSPACE:-"wiv-synapse-billing"}
+# Use fixed Synapse workspace name
+SYNAPSE_WORKSPACE="wiv-synapse-billing"
 
 # Create Synapse workspace
 echo "🏗️ Creating Synapse workspace '$SYNAPSE_WORKSPACE'..."
