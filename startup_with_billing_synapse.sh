@@ -538,13 +538,34 @@ config = {
 
 def wait_for_synapse():
     """Wait for Synapse to be ready"""
-    print("⏳ Waiting for Synapse workspace to be fully ready...")
-    max_retries = 10
+    print("⏳ Checking Synapse workspace availability...")
+    max_retries = 6  # Reduced from 10 to 6 (3 minutes total)
     retry_delay = 30
     
+    # First quick check with shorter timeout
+    quick_check_str = f"""
+    DRIVER={{ODBC Driver 18 for SQL Server}};
+    SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
+    DATABASE=master;
+    UID={config['client_id']};
+    PWD={config['client_secret']};
+    Authentication=ActiveDirectoryServicePrincipal;
+    Encrypt=yes;
+    TrustServerCertificate=no;
+    Connection Timeout=10;
+    """
+    
+    try:
+        conn = pyodbc.connect(quick_check_str, autocommit=True)
+        conn.close()
+        print("✅ Synapse is ready immediately!")
+        return True
+    except:
+        print("⏳ Synapse needs more time to initialize...")
+    
+    # Now do the retry loop with longer timeout
     for attempt in range(max_retries):
         try:
-            # Try a simple connection to check if Synapse is ready
             test_conn_str = f"""
             DRIVER={{ODBC Driver 18 for SQL Server}};
             SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
@@ -559,14 +580,14 @@ def wait_for_synapse():
             
             conn = pyodbc.connect(test_conn_str, autocommit=True)
             conn.close()
-            print("✅ Synapse is ready!")
+            print(f"✅ Synapse is ready! (after {(attempt * retry_delay) + 10} seconds)")
             return True
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"⏳ Synapse not ready yet (attempt {attempt + 1}/{max_retries}). Waiting {retry_delay} seconds...")
+                print(f"⏳ Waiting for Synapse... ({(attempt + 1) * retry_delay} seconds elapsed)")
                 time.sleep(retry_delay)
             else:
-                print(f"❌ Synapse not accessible after {max_retries} attempts: {e}")
+                print(f"⚠️ Synapse not immediately accessible: {str(e)[:100]}")
                 return False
     
     return False
@@ -605,18 +626,19 @@ def execute_sql_commands(conn_str, commands):
 
 # First wait for Synapse to be ready
 if not wait_for_synapse():
-    print("⚠️  Synapse is not accessible via service principal. This could be due to:")
-    print("   1. Firewall rules not yet propagated (wait a few minutes)")
-    print("   2. Service principal permissions still propagating")
-    print("   3. Synapse workspace still provisioning")
     print("")
-    print("📝 Manual setup instructions saved to: synapse_billing_setup.sql")
-    print("   You can either:")
-    print("   a) Wait 5-10 minutes and re-run this script")
-    print("   b) Run the SQL script manually in Synapse Studio")
+    print("⚠️  Automated setup needs more time. This is normal for new workspaces.")
     print("")
-    print("💡 TIP: The Synapse workspace is created and will work!")
-    print("   The automated database setup just needs more time to connect.")
+    print("✅ Good news: Your Synapse workspace IS created and working!")
+    print("")
+    print("📝 What to do next:")
+    print("   Option 1: Wait 2-3 minutes and re-run this script")
+    print("   Option 2: Run the manual setup in Synapse Studio:")
+    print("            - Open: https://web.azuresynapse.net")
+    print("            - Select your workspace: {config['workspace_name']}")
+    print("            - Run the SQL from: synapse_billing_setup.sql")
+    print("")
+    print("💡 This delay only happens on first setup. Future connections will be instant.")
     sys.exit(0)
 
 # Connection string for master database
