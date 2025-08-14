@@ -384,6 +384,175 @@ az synapse linked-service create \
 # Clean up temp file
 rm linked_service.json
 
+# ===========================
+# CREATE EXTERNAL TABLE FOR BILLING DATA
+# ===========================
+echo ""
+echo "📊 Setting up billing data ingestion in Synapse..."
+echo "--------------------------------------"
+
+# Create SQL script to set up external table for billing data
+echo "📝 Creating external table setup script..."
+
+# Generate the SQL script
+cat > setup_billing_table.sql <<EOF
+-- Create database for billing analytics
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
+BEGIN
+    CREATE DATABASE BillingAnalytics;
+END
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Create master key if not exists
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+BEGIN
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'P@ssw0rd$(date +%s | tail -c 6)!';
+END
+GO
+
+-- Create database scoped credential using storage account key
+IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
+    DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential;
+
+CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
+WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
+SECRET = '$BILLING_STORAGE_KEY';
+GO
+
+-- Create external data source
+IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
+    DROP EXTERNAL DATA SOURCE BillingDataSource;
+
+CREATE EXTERNAL DATA SOURCE BillingDataSource
+WITH (
+    TYPE = HADOOP,
+    LOCATION = 'wasbs://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.blob.core.windows.net',
+    CREDENTIAL = BillingStorageCredential
+);
+GO
+
+-- Create external file format for CSV
+IF EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'CSVFileFormat')
+    DROP EXTERNAL FILE FORMAT CSVFileFormat;
+
+CREATE EXTERNAL FILE FORMAT CSVFileFormat
+WITH (
+    FORMAT_TYPE = DELIMITEDTEXT,
+    FORMAT_OPTIONS (
+        FIELD_TERMINATOR = ',',
+        STRING_DELIMITER = '"',
+        FIRST_ROW = 2,
+        USE_TYPE_DEFAULT = TRUE
+    )
+);
+GO
+
+-- Create external table for billing data
+IF EXISTS (SELECT * FROM sys.external_tables WHERE name = 'BillingData')
+    DROP EXTERNAL TABLE BillingData;
+
+CREATE EXTERNAL TABLE BillingData (
+    [Date] DATETIME2,
+    ServiceFamily NVARCHAR(100),
+    MeterCategory NVARCHAR(100),
+    MeterSubcategory NVARCHAR(100),
+    MeterName NVARCHAR(200),
+    BillingAccountName NVARCHAR(100),
+    CostCenter NVARCHAR(50),
+    ResourceGroup NVARCHAR(100),
+    ResourceLocation NVARCHAR(50),
+    ConsumedService NVARCHAR(100),
+    ResourceId NVARCHAR(500),
+    ChargeType NVARCHAR(50),
+    PublisherType NVARCHAR(50),
+    Quantity FLOAT,
+    CostInBillingCurrency FLOAT,
+    CostInUSD FLOAT,
+    PayGPrice FLOAT,
+    BillingCurrencyCode NVARCHAR(10),
+    SubscriptionName NVARCHAR(100),
+    SubscriptionId NVARCHAR(50),
+    ProductName NVARCHAR(200),
+    Frequency NVARCHAR(50),
+    UnitOfMeasure NVARCHAR(50),
+    Tags NVARCHAR(MAX)
+)
+WITH (
+    LOCATION = '/billing-data/',
+    DATA_SOURCE = BillingDataSource,
+    FILE_FORMAT = CSVFileFormat,
+    REJECT_TYPE = VALUE,
+    REJECT_VALUE = 100
+);
+GO
+
+-- Create view for daily cost summary
+CREATE OR ALTER VIEW DailyCostSummary AS
+SELECT 
+    CAST([Date] AS DATE) as BillingDate,
+    ServiceFamily,
+    ResourceGroup,
+    SUM(CostInUSD) as TotalCostUSD,
+    SUM(CostInBillingCurrency) as TotalCostLocal,
+    COUNT(DISTINCT ResourceId) as ResourceCount
+FROM BillingData
+GROUP BY CAST([Date] AS DATE), ServiceFamily, ResourceGroup;
+GO
+
+-- Create view for top expensive resources
+CREATE OR ALTER VIEW TopExpensiveResources AS
+SELECT TOP 100
+    ResourceId,
+    ResourceGroup,
+    ServiceFamily,
+    SUM(CostInUSD) as TotalCostUSD,
+    AVG(CostInUSD) as AvgDailyCostUSD,
+    COUNT(DISTINCT CAST([Date] AS DATE)) as DaysActive
+FROM BillingData
+WHERE [Date] >= DATEADD(day, -30, GETDATE())
+GROUP BY ResourceId, ResourceGroup, ServiceFamily
+ORDER BY TotalCostUSD DESC;
+GO
+
+PRINT 'Billing data external table and views created successfully!';
+EOF
+
+echo "✅ SQL script created: setup_billing_table.sql"
+
+# Execute the SQL script in Synapse
+echo "🚀 Executing SQL script in Synapse..."
+echo ""
+echo "ℹ️  Note: To execute the billing table setup:"
+echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
+echo "   2. Navigate to 'Develop' > 'SQL scripts'"
+echo "   3. Create new SQL script and paste contents from 'setup_billing_table.sql'"
+echo "   4. Connect to 'Built-in' SQL pool"
+echo "   5. Run the script"
+echo ""
+echo "📊 Once setup is complete, you can query your billing data:"
+echo "   - SELECT * FROM BillingData WHERE [Date] >= DATEADD(day, -7, GETDATE())"
+echo "   - SELECT * FROM DailyCostSummary ORDER BY BillingDate DESC"
+echo "   - SELECT * FROM TopExpensiveResources"
+
+# Optional: Trigger the first export run
+echo ""
+read -p "Do you want to trigger the billing export to run now? (y/n): " TRIGGER_EXPORT
+
+if [[ "$TRIGGER_EXPORT" =~ ^[Yy]$ ]]; then
+    echo "🔄 Triggering billing export..."
+    az rest --method POST \
+        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2021-10-01" \
+        --only-show-errors
+    
+    echo "✅ Export triggered. Data will be available in the storage account soon."
+    echo "   Check: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME/billing-data/"
+else
+    echo "ℹ️  Export will run on its daily schedule."
+fi
+
 # Optional: Microsoft Graph permissions
 echo ""
 read -p "Do you want to grant Microsoft Graph permissions (e.g., Directory.Read.All)? (y/n): " GRANT_PERMS
@@ -446,12 +615,20 @@ echo "   - Synapse Contributor"
 echo ""
 echo "📝 Next Steps:"
 echo "   1. The billing export will run daily and store data in: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME/billing-data/"
-echo "   2. Access Synapse Studio to query your billing data: https://web.azuresynapse.net"
-echo "   3. Use OPENROWSET in Synapse to query the billing CSV files directly"
+echo "   2. Access Synapse Studio: https://web.azuresynapse.net"
+echo "   3. Run the SQL script from 'setup_billing_table.sql' in Synapse Studio"
+echo "   4. Query your billing data using the created views:"
+echo "      - BillingData (raw data)"
+echo "      - DailyCostSummary (aggregated daily costs)"
+echo "      - TopExpensiveResources (most expensive resources)"
 echo ""
-echo "📊 Example query to run in Synapse Studio:"
-echo "   SELECT * FROM OPENROWSET("
-echo "     BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',"
-echo "     FORMAT = 'CSV', HEADER_ROW = TRUE"
-echo "   ) AS billing"
+echo "📊 Quick Start Queries:"
+echo "   -- Get last 7 days of costs"
+echo "   SELECT * FROM BillingData WHERE [Date] >= DATEADD(day, -7, GETDATE())"
+echo ""
+echo "   -- Daily cost summary"
+echo "   SELECT * FROM DailyCostSummary ORDER BY BillingDate DESC"
+echo ""
+echo "   -- Top expensive resources"
+echo "   SELECT * FROM TopExpensiveResources"
 echo "============================================================"
