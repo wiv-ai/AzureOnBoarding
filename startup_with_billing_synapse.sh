@@ -47,9 +47,57 @@ if [ -z "$APP_ID" ]; then
   echo "✅ Client secret created successfully"
 else
   echo "✅ Service principal already exists. App ID: $APP_ID"
-  echo "⏭️  Skipping app creation and client secret generation..."
-  CLIENT_SECRET="<EXISTING_CLIENT_SECRET_REQUIRED>"
-  echo "ℹ️  Note: You'll need to manually update the client secret in generated scripts for remote access."
+  echo "⏭️  Skipping app creation..."
+  
+  # Prompt for the existing client secret or create new one
+  echo ""
+  echo "⚠️  IMPORTANT: The service principal already exists."
+  echo "   You need a client secret to continue."
+  echo ""
+  echo "   Options:"
+  echo "   1. Enter existing client secret (if you have it)"
+  echo "   2. Generate a new client secret (will invalidate old ones)"
+  echo "   3. Cancel (Ctrl+C)"
+  echo ""
+  
+  read -p "Do you want to generate a NEW client secret? (y/n): " GENERATE_NEW
+  
+  if [[ "$GENERATE_NEW" =~ ^[Yy]$ ]]; then
+    echo "🔑 Generating new client secret..."
+    # Generate expiry date (2 years from now)
+    if date --version >/dev/null 2>&1; then
+        END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+    else
+        END_DATE=$(date -v +2y +"%Y-%m-%d")
+    fi
+    CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
+    echo "✅ New client secret generated successfully"
+    echo ""
+    echo "⚠️  IMPORTANT: Save this secret NOW! It cannot be retrieved later:"
+    echo "   $CLIENT_SECRET"
+    echo ""
+    read -p "Press Enter once you've saved the secret..."
+  else
+    # Read existing client secret securely (hidden input)
+    read -s -p "🔑 Enter the existing client secret: " CLIENT_SECRET
+    echo "" # New line after hidden input
+    
+    # Validate that a secret was provided
+    if [ -z "$CLIENT_SECRET" ]; then
+      echo ""
+      echo "❌ Error: Client secret is required to continue"
+      echo ""
+      echo "To create a new secret manually:"
+      echo "  1. Go to Azure Portal > Azure Active Directory > App registrations"
+      echo "  2. Find 'wiv_account' (App ID: $APP_ID)"
+      echo "  3. Go to 'Certificates & secrets' > 'Client secrets'"
+      echo "  4. Click 'New client secret' and save the value"
+      echo ""
+      exit 1
+    fi
+    
+    echo "✅ Client secret provided"
+  fi
 fi
 
 # Assign roles to all subscriptions
