@@ -41,7 +41,7 @@ PWD={config['client_secret']};
 Authentication=ActiveDirectoryServicePrincipal;
 Encrypt=yes;
 TrustServerCertificate=no;
-Connection Timeout=30;
+Connection Timeout=60;
 """
 
 try:
