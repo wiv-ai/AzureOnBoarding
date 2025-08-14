@@ -2,7 +2,7 @@
 SELECT TOP 10 
     *
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
     FORMAT = 'CSV',
     HEADER_ROW = TRUE
 ) AS BillingData
