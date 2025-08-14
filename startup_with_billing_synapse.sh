@@ -226,44 +226,57 @@ echo "--------------------------------------"
 # Use fixed Synapse workspace name
 SYNAPSE_WORKSPACE="wiv-synapse-billing"
 
-# Create Synapse workspace
-echo "🏗️ Creating Synapse workspace '$SYNAPSE_WORKSPACE'..."
+# Check if Synapse workspace already exists
+echo "🔍 Checking if Synapse workspace '$SYNAPSE_WORKSPACE' exists..."
+SYNAPSE_EXISTS=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$BILLING_RG" --query name -o tsv 2>/dev/null)
 
-# Create Data Lake Storage Gen2 for Synapse
-SYNAPSE_STORAGE="synapsedl$(date +%s | tail -c 6)"
-echo "📦 Creating Data Lake Storage Gen2 account '$SYNAPSE_STORAGE'..."
-az storage account create \
-    --name "$SYNAPSE_STORAGE" \
-    --resource-group "$BILLING_RG" \
-    --location "$AZURE_REGION" \
-    --sku Standard_LRS \
-    --kind StorageV2 \
-    --hierarchical-namespace true \
-    --only-show-errors
+if [ -n "$SYNAPSE_EXISTS" ]; then
+    echo "✅ Synapse workspace '$SYNAPSE_WORKSPACE' already exists. Using existing workspace."
+    
+    # Get existing storage account info
+    SYNAPSE_STORAGE=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$BILLING_RG" --query "defaultDataLakeStorage.accountUrl" -o tsv | sed 's|https://||' | sed 's|.dfs.core.windows.net||')
+    FILESYSTEM_NAME=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$BILLING_RG" --query "defaultDataLakeStorage.filesystem" -o tsv)
+    echo "  - Storage Account: $SYNAPSE_STORAGE"
+    echo "  - Filesystem: $FILESYSTEM_NAME"
+else
+    echo "🏗️ Creating new Synapse workspace '$SYNAPSE_WORKSPACE'..."
+    
+    # Create Data Lake Storage Gen2 for Synapse
+    SYNAPSE_STORAGE="synapsedl$(date +%s | tail -c 6)"
+    echo "📦 Creating Data Lake Storage Gen2 account '$SYNAPSE_STORAGE'..."
+    az storage account create \
+        --name "$SYNAPSE_STORAGE" \
+        --resource-group "$BILLING_RG" \
+        --location "$AZURE_REGION" \
+        --sku Standard_LRS \
+        --kind StorageV2 \
+        --hierarchical-namespace true \
+        --only-show-errors
 
-# Create filesystem for Synapse
-FILESYSTEM_NAME="synapsefilesystem"
-echo "📂 Creating filesystem '$FILESYSTEM_NAME'..."
-az storage fs create \
-    --name "$FILESYSTEM_NAME" \
-    --account-name "$SYNAPSE_STORAGE" \
-    --auth-mode login \
-    --only-show-errors
+    # Create filesystem for Synapse
+    FILESYSTEM_NAME="synapsefilesystem"
+    echo "📂 Creating filesystem '$FILESYSTEM_NAME'..."
+    az storage fs create \
+        --name "$FILESYSTEM_NAME" \
+        --account-name "$SYNAPSE_STORAGE" \
+        --auth-mode login \
+        --only-show-errors
 
-# Create Synapse workspace
-echo "🔧 Creating Synapse workspace..."
-SQL_ADMIN_USER="sqladminuser"
-SQL_ADMIN_PASSWORD="P@ssw0rd$(date +%s | tail -c 6)!"
+    # Create Synapse workspace
+    echo "🔧 Creating Synapse workspace..."
+    SQL_ADMIN_USER="sqladminuser"
+    SQL_ADMIN_PASSWORD="P@ssw0rd$(date +%s | tail -c 6)!"
 
-az synapse workspace create \
-    --name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --storage-account "$SYNAPSE_STORAGE" \
-    --file-system "$FILESYSTEM_NAME" \
-    --sql-admin-login-user "$SQL_ADMIN_USER" \
-    --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
-    --location "$AZURE_REGION" \
-    --only-show-errors
+    az synapse workspace create \
+        --name "$SYNAPSE_WORKSPACE" \
+        --resource-group "$BILLING_RG" \
+        --storage-account "$SYNAPSE_STORAGE" \
+        --file-system "$FILESYSTEM_NAME" \
+        --sql-admin-login-user "$SQL_ADMIN_USER" \
+        --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
+        --location "$AZURE_REGION" \
+        --only-show-errors
+fi
 
 # Wait for workspace to be created
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
