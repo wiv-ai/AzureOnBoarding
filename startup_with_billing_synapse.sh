@@ -347,28 +347,6 @@ az synapse linked-service create \
 # Clean up temp file
 rm linked_service.json
 
-# ===========================
-# SYNAPSE QUERY EXAMPLES
-# ===========================
-echo ""
-echo "📊 Example: How to query Synapse using Azure CLI..."
-echo "--------------------------------------"
-echo ""
-echo "You can query your billing data in Synapse using Azure CLI:"
-echo ""
-echo "# Example 1: Query daily costs"
-echo "az synapse sql pool query \\"
-echo "  --workspace-name $SYNAPSE_WORKSPACE \\"
-echo "  --name built-in \\"
-echo "  --query-text \"SELECT TOP 10 * FROM OPENROWSET(BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv', FORMAT = 'CSV', HEADER_ROW = TRUE) AS billing\""
-echo ""
-echo "# Example 2: Using REST API to query"
-echo "az rest --method POST \\"
-echo "  --uri \"https://$SYNAPSE_WORKSPACE.sql.azuresynapse.net/sql/pools/built-in/query\" \\"
-echo "  --headers \"Content-Type=application/json\" \\"
-echo "  --body '{\"query\": \"SELECT COUNT(*) FROM OPENROWSET(...)\"}'"
-echo ""
-
 # Optional: Microsoft Graph permissions
 echo ""
 read -p "Do you want to grant Microsoft Graph permissions (e.g., Directory.Read.All)? (y/n): " GRANT_PERMS
@@ -398,133 +376,6 @@ if [[ "$GRANT_PERMS" =~ ^[Yy]$ ]]; then
 else
     echo "🚫 Skipping Microsoft Graph permission grant."
 fi
-
-# ===========================
-# PYTHON SCRIPT FOR REMOTE ACCESS
-# ===========================
-echo ""
-echo "🐍 Creating Python script for remote Synapse access..."
-cat > synapse_remote_query.py <<EOF
-#!/usr/bin/env python3
-"""
-Remote Synapse Query Script
-This script allows remote execution of SQL queries on Azure Synapse Analytics
-"""
-
-import os
-from azure.identity import ClientSecretCredential
-from azure.synapse.spark import SparkClient
-import pyodbc
-import pandas as pd
-
-# Configuration
-TENANT_ID = "$TENANT_ID"
-CLIENT_ID = "$APP_ID"
-CLIENT_SECRET = "$CLIENT_SECRET"
-SYNAPSE_WORKSPACE = "$SYNAPSE_WORKSPACE"
-SQL_ENDPOINT = "$SYNAPSE_WORKSPACE.sql.azuresynapse.net"
-DATABASE = "master"
-
-def get_synapse_connection():
-    """Create connection to Synapse SQL pool"""
-    # Get access token
-    credential = ClientSecretCredential(
-        tenant_id=TENANT_ID,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET
-    )
-    
-    token = credential.get_token("https://database.windows.net/.default")
-    
-    # Create connection string
-    conn_str = (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={SQL_ENDPOINT};"
-        f"DATABASE={DATABASE};"
-        f"Authentication=ActiveDirectoryServicePrincipal;"
-        f"UID={CLIENT_ID};"
-        f"PWD={CLIENT_SECRET};"
-    )
-    
-    return pyodbc.connect(conn_str)
-
-def execute_query(query):
-    """Execute a SQL query on Synapse"""
-    try:
-        conn = get_synapse_connection()
-        df = pd.read_sql(query, conn)
-        conn.close()
-        return df
-    except Exception as e:
-        print(f"Error executing query: {e}")
-        return None
-
-# Example queries
-def get_daily_costs(days=30):
-    """Get daily costs for the last N days"""
-    query = f"""
-    SELECT 
-        Date,
-        SUM(CAST(CostUSD AS FLOAT)) AS TotalCostUSD
-    FROM 
-        OPENROWSET(
-            BULK 'billing-data/*.csv',
-            DATA_SOURCE = 'BillingStorage',
-            FORMAT = 'CSV',
-            PARSER_VERSION = '2.0',
-            HEADER_ROW = TRUE
-        ) AS [billing]
-    WHERE 
-        Date >= DATEADD(day, -{days}, GETDATE())
-    GROUP BY Date
-    ORDER BY Date DESC
-    """
-    return execute_query(query)
-
-def get_top_expensive_services(days=30):
-    """Get top 10 most expensive services"""
-    query = f"""
-    SELECT TOP 10
-        ServiceName,
-        SUM(CAST(CostUSD AS FLOAT)) AS TotalCostUSD
-    FROM 
-        OPENROWSET(
-            BULK 'billing-data/*.csv',
-            DATA_SOURCE = 'BillingStorage',
-            FORMAT = 'CSV',
-            PARSER_VERSION = '2.0',
-            HEADER_ROW = TRUE
-        ) AS [billing]
-    WHERE 
-        Date >= DATEADD(day, -{days}, GETDATE())
-    GROUP BY ServiceName
-    ORDER BY TotalCostUSD DESC
-    """
-    return execute_query(query)
-
-if __name__ == "__main__":
-    print("Testing Synapse connection...")
-    
-    # Test queries
-    print("\n📊 Daily Costs (Last 7 days):")
-    daily_costs = get_daily_costs(7)
-    if daily_costs is not None:
-        print(daily_costs)
-    
-    print("\n💰 Top Expensive Services (Last 30 days):")
-    top_services = get_top_expensive_services(30)
-    if top_services is not None:
-        print(top_services)
-EOF
-
-# Create requirements.txt for Python dependencies
-echo "📦 Creating requirements.txt for Python dependencies..."
-cat > requirements.txt <<EOF
-azure-identity
-azure-synapse-spark
-pyodbc
-pandas
-EOF
 
 # Final output
 echo ""
@@ -558,9 +409,12 @@ echo "   - Synapse Contributor"
 echo ""
 echo "📝 Next Steps:"
 echo "   1. The billing export will run daily and store data in: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME/billing-data/"
-echo "   2. Use Synapse Studio to run the SQL queries in 'billing_analysis.sql'"
-echo "   3. Use 'synapse_remote_query.py' for remote access to Synapse"
-echo "   4. Install Python dependencies: pip install -r requirements.txt"
+echo "   2. Access Synapse Studio to query your billing data: https://web.azuresynapse.net"
+echo "   3. Use OPENROWSET in Synapse to query the billing CSV files directly"
 echo ""
-echo "🔗 Synapse Studio URL: https://web.azuresynapse.net"
+echo "📊 Example query to run in Synapse Studio:"
+echo "   SELECT * FROM OPENROWSET("
+echo "     BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',"
+echo "     FORMAT = 'CSV', HEADER_ROW = TRUE"
+echo "   ) AS billing"
 echo "============================================================"
