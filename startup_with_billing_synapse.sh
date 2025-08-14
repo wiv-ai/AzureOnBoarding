@@ -34,20 +34,26 @@ if [ -z "$APP_ID" ]; then
   APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --query appId -o tsv)
   az ad sp create --id "$APP_ID" > /dev/null
   echo "✅ Service principal created. App ID: $APP_ID"
+  
+  # Create client secret for new app
+  echo ""
+  echo "🔑 Creating client secret..."
+  if date --version >/dev/null 2>&1; then
+      END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+  else
+      END_DATE=$(date -v +2y +"%Y-%m-%d")
+  fi
+  CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
+  echo "✅ Client secret created successfully"
 else
   echo "✅ Service principal already exists. App ID: $APP_ID"
-  echo "⏭️  Skipping app creation..."
+  echo "⏭️  Skipping app creation and client secret generation..."
+  echo ""
+  echo "⚠️  IMPORTANT: Please provide the existing client secret for this app"
+  echo "    If you don't have it, you'll need to create a new one manually in Azure Portal"
+  read -s -p "🔑 Enter the existing client secret (input hidden): " CLIENT_SECRET
+  echo ""
 fi
-
-# Create client secret
-echo ""
-echo "🔑 Creating/Refreshing client secret..."
-if date --version >/dev/null 2>&1; then
-    END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
-else
-    END_DATE=$(date -v +2y +"%Y-%m-%d")
-fi
-CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
 
 # Assign roles to all subscriptions
 echo ""
