@@ -6,10 +6,16 @@ Tests the connection to Azure Synapse and verifies the database setup
 import pyodbc
 import time
 import sys
+import os
+
+# Suppress output from imports
+import io
+import contextlib
 
 # Import configuration from synapse_config.py if it exists
 try:
-    from synapse_config import SYNAPSE_CONFIG
+    with contextlib.redirect_stdout(io.StringIO()):
+        from synapse_config import SYNAPSE_CONFIG
     config = {
         'workspace_name': SYNAPSE_CONFIG['workspace_name'],
         'tenant_id': SYNAPSE_CONFIG['tenant_id'],
