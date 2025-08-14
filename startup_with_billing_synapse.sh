@@ -723,7 +723,6 @@ if command -v python3 >/dev/null 2>&1; then
         sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
         sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
         sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
-        sed -i "s/\$SAS_TOKEN/$SAS_TOKEN/g" setup_synapse_automated.py
         sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
         
         python3 setup_synapse_automated.py
