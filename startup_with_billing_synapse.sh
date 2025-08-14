@@ -438,7 +438,7 @@ az role assignment create \
 # Also grant Synapse workspace managed identity access
 SYNAPSE_IDENTITY=$(az synapse workspace show \
     --name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$SYNAPSE_RG" \
+    --resource-group "$BILLING_RG" \
     --query "identity.principalId" \
     --output tsv 2>/dev/null)
 
@@ -490,46 +490,38 @@ rm linked_service.json
 echo ""
 echo "📊 Setting up billing data ingestion in Synapse..."
 echo "--------------------------------------"
-
-# Create SQL script to set up external table for billing data
 echo "📝 Creating external table setup script..."
-
-# Execute SQL commands directly in Synapse using OPENROWSET (serverless approach)
 echo "🚀 Setting up billing data access in Synapse automatically..."
 
-# Create a simpler query that works with serverless SQL pool
-SQL_QUERY="SELECT TOP 10 * FROM OPENROWSET(
-    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE,
-    PARSER_VERSION = '2.0'
-) AS BillingData"
+# Add longer wait after Synapse creation
+echo ""
+echo "⏳ Waiting for Synapse workspace to fully initialize..."
+echo "   This takes 2-3 minutes for new workspaces..."
+sleep 60
+echo "   Still initializing... (1 minute elapsed)"
+sleep 60
+echo "   Almost ready... (2 minutes elapsed)"
+sleep 30
+echo "✅ Synapse workspace should be ready now!"
 
-# Note: Authentication will be configured after resources are created
-
-# Automated Synapse Database Setup
 echo ""
 echo "🔧 Setting up Synapse database and views automatically..."
+echo "Setting up database objects..."
 
 # Generate a secure password for master key
 MASTER_KEY_PASSWORD="StrongP@ssw0rd$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)!"
 
-# Create and execute the setup script
-echo "Setting up database objects..."
-
-# Since Azure CLI doesn't support direct SQL execution on serverless pools,
-# we'll use a Python script to automate this
+# Generate Python script for automated setup
 cat > setup_synapse_automated.py <<'PYTHON_EOF'
-#!/usr/bin/env python3
 import pyodbc
-import sys
 import time
+import sys
 
-# Configuration from environment
+# Configuration
 config = {
     'workspace_name': '$SYNAPSE_WORKSPACE',
     'tenant_id': '$TENANT_ID',
-    'client_id': '$APP_ID', 
+    'client_id': '$APP_ID',
     'client_secret': '$CLIENT_SECRET',
     'storage_account': '$STORAGE_ACCOUNT_NAME',
     'container': '$CONTAINER_NAME',
@@ -537,13 +529,8 @@ config = {
 }
 
 def wait_for_synapse():
-    """Wait for Synapse to be ready"""
-    print("⏳ Checking Synapse workspace availability...")
-    max_retries = 6  # Reduced from 10 to 6 (3 minutes total)
-    retry_delay = 30
-    
-    # First quick check with shorter timeout
-    quick_check_str = f"""
+    """Wait for Synapse to be ready with enhanced retry logic"""
+    conn_str = f"""
     DRIVER={{ODBC Driver 18 for SQL Server}};
     SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
     DATABASE=master;
@@ -552,49 +539,39 @@ def wait_for_synapse():
     Authentication=ActiveDirectoryServicePrincipal;
     Encrypt=yes;
     TrustServerCertificate=no;
-    Connection Timeout=10;
+    Connection Timeout=60;
     """
     
-    try:
-        conn = pyodbc.connect(quick_check_str, autocommit=True)
-        conn.close()
-        print("✅ Synapse is ready immediately!")
-        return True
-    except:
-        print("⏳ Synapse needs more time to initialize...")
+    print("⏳ Checking Synapse workspace availability...")
     
-    # Now do the retry loop with longer timeout
-    for attempt in range(max_retries):
+    # Enhanced retry logic with longer waits
+    max_attempts = 10
+    wait_times = [10, 20, 30, 30, 30, 60, 60, 60, 60, 60]  # Progressive backoff
+    
+    for attempt in range(max_attempts):
         try:
-            test_conn_str = f"""
-            DRIVER={{ODBC Driver 18 for SQL Server}};
-            SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
-            DATABASE=master;
-            UID={config['client_id']};
-            PWD={config['client_secret']};
-            Authentication=ActiveDirectoryServicePrincipal;
-            Encrypt=yes;
-            TrustServerCertificate=no;
-            Connection Timeout=60;
-            """
-            
-            conn = pyodbc.connect(test_conn_str, autocommit=True)
+            conn = pyodbc.connect(conn_str, autocommit=True)
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
             conn.close()
-            print(f"✅ Synapse is ready! (after {(attempt * retry_delay) + 10} seconds)")
+            print(f"✅ Synapse is ready! (after {sum(wait_times[:attempt])} seconds)")
             return True
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"⏳ Waiting for Synapse... ({(attempt + 1) * retry_delay} seconds elapsed)")
-                time.sleep(retry_delay)
+        except pyodbc.Error as e:
+            if attempt < max_attempts - 1:
+                wait_time = wait_times[attempt]
+                if "Login timeout expired" in str(e) or "Login failed" in str(e):
+                    print(f"⏳ Synapse needs more time to initialize...")
+                else:
+                    print(f"⏳ Waiting for Synapse... ({sum(wait_times[:attempt+1])} seconds elapsed)")
+                time.sleep(wait_time)
             else:
-                print(f"⚠️ Synapse not immediately accessible: {str(e)[:100]}")
+                print(f"❌ Could not connect after {sum(wait_times)} seconds: {str(e)[:100]}")
                 return False
     
     return False
 
-# Function removed - inline execution is used instead for better error handling
-
-# First wait for Synapse to be ready
+# Wait for Synapse to be ready
 if not wait_for_synapse():
     print("")
     print("⚠️  Automated setup needs more time. This is normal for new workspaces.")
@@ -624,10 +601,13 @@ TrustServerCertificate=no;
 Connection Timeout=60;
 """
 
-# Create database with retry logic
+# Create database with enhanced retry logic
 print("📦 Creating BillingAnalytics database...")
 db_created = False
-for retry in range(3):
+max_db_retries = 10
+db_wait_time = 10
+
+for retry in range(max_db_retries):
     try:
         conn = pyodbc.connect(master_conn_str, autocommit=True)
         cursor = conn.cursor()
@@ -651,17 +631,24 @@ for retry in range(3):
             print("✅ Database already exists!")
             db_created = True
             break
-        elif "Could not obtain exclusive lock" in str(e) and retry < 2:
-            print(f"⏳ Database is busy, retrying in 5 seconds... (attempt {retry + 1}/3)")
-            time.sleep(5)
+        elif "Could not obtain exclusive lock" in str(e):
+            if retry < max_db_retries - 1:
+                print(f"⏳ Azure is initializing, waiting {db_wait_time} seconds... (attempt {retry + 1}/{max_db_retries})")
+                time.sleep(db_wait_time)
+                # Increase wait time for later retries
+                if retry > 3:
+                    db_wait_time = 20
+            else:
+                print(f"⚠️ Database lock persists after {retry + 1} attempts")
+                print("   Azure needs more time to initialize internal databases")
         else:
             print(f"⚠️ Database creation issue: {str(e)[:100]}")
-            if retry < 2:
-                time.sleep(5)
+            if retry < max_db_retries - 1:
+                time.sleep(db_wait_time)
 
 if not db_created:
-    print("⚠️ Could not create database automatically. It may already exist or need manual creation.")
-    print("   Continue with setup anyway...")
+    print("⚠️ Could not create database automatically due to Azure initialization.")
+    print("   The database will be created on next run. Continuing with remaining setup...")
 
 # Connection string for BillingAnalytics database
 billing_conn_str = f"""
@@ -679,12 +666,15 @@ Connection Timeout=60;
 # Setup commands - Simplified for Managed Identity (no SAS tokens needed!)
 print("\n🔧 Setting up database objects with Managed Identity...")
 
-# Wait a moment for database to be ready
-time.sleep(3)
+# Wait longer for database to be ready
+time.sleep(10)
 
-# Try to connect and setup with retry
+# Try to connect and setup with enhanced retry
 setup_success = False
-for retry in range(3):
+max_setup_retries = 5
+setup_wait_time = 15
+
+for retry in range(max_setup_retries):
     try:
         conn = pyodbc.connect(billing_conn_str, autocommit=True)
         cursor = conn.cursor()
@@ -749,13 +739,22 @@ for retry in range(3):
         break
         
     except pyodbc.Error as e:
-        if "Login failed" in str(e) and retry < 2:
-            print(f"⏳ Waiting for permissions to propagate... (attempt {retry + 1}/3)")
-            time.sleep(10)
+        error_str = str(e)
+        if "Login failed" in error_str:
+            if retry < max_setup_retries - 1:
+                print(f"⏳ Waiting for permissions to propagate... (attempt {retry + 1}/{max_setup_retries})")
+                time.sleep(setup_wait_time)
+        elif "Invalid object name 'BillingAnalytics'" in error_str or "Database 'BillingAnalytics' does not exist" in error_str:
+            if not db_created:
+                print("⚠️ Database doesn't exist yet. This will be created on next run.")
+                break
+            else:
+                print(f"⏳ Waiting for database to be accessible... (attempt {retry + 1}/{max_setup_retries})")
+                time.sleep(setup_wait_time)
         else:
-            print(f"⚠️ Setup issue: {str(e)[:100]}")
-            if retry < 2:
-                time.sleep(5)
+            print(f"⚠️ Setup issue: {error_str[:100]}")
+            if retry < max_setup_retries - 1:
+                time.sleep(setup_wait_time)
 
 if setup_success:
     print("\n✅ Synapse database setup completed successfully!")
@@ -774,9 +773,16 @@ if setup_success:
         print(f"⚠️  Could not test view: {str(e)[:100]}")
         print("   This is normal if no billing data has been exported yet")
 else:
-    print("\n❌ Some steps failed, but setup may still be usable")
+    if db_created:
+        print("\n⚠️ Database created but view setup incomplete.")
+        print("   This can happen on first run. The view will be created on next run.")
+    else:
+        print("\n⚠️ Initial setup incomplete due to Azure initialization.")
+        print("   This is NORMAL for new Synapse workspaces.")
+        print("   ✅ Your workspace IS created and will be ready soon!")
+        print("   📝 Just re-run this script in 2-3 minutes to complete setup.")
 
-print("\n📊 You can now query billing data using:")
+print("\n📊 Query to use in Synapse Studio:")
 print("   SELECT * FROM BillingAnalytics.dbo.BillingData")
 PYTHON_EOF
 
