@@ -269,8 +269,24 @@ az synapse workspace create \
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
-# Create firewall rule to allow Azure services
+# Get current client IP
+echo "🔍 Getting current client IP address..."
+CLIENT_IP=$(curl -s https://ipinfo.io/ip)
+echo "📍 Your IP: $CLIENT_IP"
+
+# Create firewall rule for current client IP
 echo "🔥 Configuring firewall rules..."
+echo "  - Adding rule for your IP address..."
+az synapse workspace firewall-rule create \
+    --name "ClientIP" \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" \
+    --start-ip-address "$CLIENT_IP" \
+    --end-ip-address "$CLIENT_IP" \
+    --only-show-errors
+
+# Create firewall rule to allow Azure services
+echo "  - Adding rule for Azure services..."
 az synapse workspace firewall-rule create \
     --name "AllowAllWindowsAzureIps" \
     --workspace-name "$SYNAPSE_WORKSPACE" \
@@ -280,7 +296,7 @@ az synapse workspace firewall-rule create \
     --only-show-errors
 
 # Create firewall rule to allow all IPs (for remote access)
-echo "🌐 Creating firewall rule for remote access..."
+echo "  - Adding rule for all IPs (remote access)..."
 az synapse workspace firewall-rule create \
     --name "AllowAllIPs" \
     --workspace-name "$SYNAPSE_WORKSPACE" \
@@ -288,6 +304,10 @@ az synapse workspace firewall-rule create \
     --start-ip-address "0.0.0.0" \
     --end-ip-address "255.255.255.255" \
     --only-show-errors
+
+# Wait a moment for firewall rules to take effect
+echo "⏳ Waiting for firewall rules to take effect..."
+sleep 10
 
 # ===========================
 # SYNAPSE PERMISSIONS SETUP
