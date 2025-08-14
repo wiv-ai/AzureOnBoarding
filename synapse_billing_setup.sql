@@ -1,11 +1,11 @@
 -- ========================================================
 -- SYNAPSE BILLING DATA SETUP (Manual Backup)
 -- ========================================================
--- Auto-generated on: Thu Aug 14 05:42:03 PM UTC 2025
+-- Auto-generated on: Thu Aug 14 06:08:14 PM UTC 2025
 -- This is a backup if automated setup fails
 -- Run this in Synapse Studio connected to Built-in serverless SQL pool
 -- Workspace: wiv-synapse-billing
--- Storage Account: billingstorage92880
+-- Storage Account: billingstorage94255
 -- Container: billing-exports
 
 CREATE DATABASE BillingAnalytics;
@@ -13,7 +13,7 @@ GO
 USE BillingAnalytics;
 GO
 
-CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rdc78f5253!';
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rdef033fea!';
 GO
 
 -- Using Managed Identity with abfss:// protocol (NEVER EXPIRES!)
@@ -21,7 +21,7 @@ GO
 CREATE VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
-    BULK 'abfss://billing-exports@billingstorage92880.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+    BULK 'abfss://billing-exports@billingstorage94255.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     FIRSTROW = 2
