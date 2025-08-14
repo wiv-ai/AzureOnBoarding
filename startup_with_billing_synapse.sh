@@ -48,11 +48,8 @@ if [ -z "$APP_ID" ]; then
 else
   echo "✅ Service principal already exists. App ID: $APP_ID"
   echo "⏭️  Skipping app creation and client secret generation..."
-  echo ""
-  echo "⚠️  IMPORTANT: Please provide the existing client secret for this app"
-  echo "    If you don't have it, you'll need to create a new one manually in Azure Portal"
-  read -s -p "🔑 Enter the existing client secret (input hidden): " CLIENT_SECRET
-  echo ""
+  CLIENT_SECRET=""
+  echo "ℹ️  Note: Client secret not available. Remote access features will require manual configuration."
 fi
 
 # Assign roles to all subscriptions
