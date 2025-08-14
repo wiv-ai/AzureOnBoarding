@@ -37,8 +37,8 @@ GO
 
 CREATE EXTERNAL DATA SOURCE BillingDataSource
 WITH (
-    TYPE = HADOOP,
-    LOCATION = 'wasbs://billing-exports@billingstorage77626.blob.core.windows.net/',
+    TYPE = BLOB_STORAGE,
+    LOCATION = 'https://billingstorage77626.blob.core.windows.net/billing-exports',
     CREDENTIAL = BillingStorageCredential
 );
 GO
@@ -66,7 +66,20 @@ IF EXISTS (SELECT * FROM sys.external_tables WHERE name = 'BillingData')
     DROP EXTERNAL TABLE BillingData;
 GO
 
-CREATE EXTERNAL TABLE BillingData (
+-- Note: External tables with BLOB_STORAGE don't support wildcards
+-- We'll use OPENROWSET instead for querying with wildcards
+-- Create a view that uses OPENROWSET for easier querying
+
+CREATE VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK 'billing-data/DailyBillingExport/20250801-20250831/*.csv',
+    DATA_SOURCE = 'BillingDataSource',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
     date VARCHAR(100),
     serviceFamily VARCHAR(200),
     meterCategory VARCHAR(200),
@@ -91,12 +104,7 @@ CREATE EXTERNAL TABLE BillingData (
     frequency VARCHAR(100),
     unitOfMeasure VARCHAR(100),
     tags VARCHAR(MAX)
-)
-WITH (
-    LOCATION = '/billing-data/DailyBillingExport/*/*.csv',
-    DATA_SOURCE = BillingDataSource,
-    FILE_FORMAT = BillingCSVFormat
-);
+) AS BillingData;
 GO
 
 -- ========================================================
