@@ -316,6 +316,11 @@ echo ""
 echo "🔐 Configuring Synapse permissions for wiv_account..."
 echo "--------------------------------------"
 
+# Get the Object ID of the service principal (needed for Synapse role assignments)
+echo "🔍 Getting service principal Object ID..."
+SP_OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+echo "  - Service Principal Object ID: $SP_OBJECT_ID"
+
 # Get Synapse workspace resource ID
 SYNAPSE_RESOURCE_ID=$(az synapse workspace show \
     --name "$SYNAPSE_WORKSPACE" \
@@ -327,7 +332,7 @@ echo "👤 Assigning Synapse Administrator role..."
 az synapse role assignment create \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --role "Synapse Administrator" \
-    --assignee "$APP_ID" \
+    --assignee-object-id "$SP_OBJECT_ID" \
     --only-show-errors
 
 # Assign Synapse SQL Administrator role
@@ -335,7 +340,7 @@ echo "🗄️ Assigning Synapse SQL Administrator role..."
 az synapse role assignment create \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --role "Synapse SQL Administrator" \
-    --assignee "$APP_ID" \
+    --assignee-object-id "$SP_OBJECT_ID" \
     --only-show-errors
 
 # Assign Synapse Contributor role
@@ -343,7 +348,7 @@ echo "✏️ Assigning Synapse Contributor role..."
 az synapse role assignment create \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --role "Synapse Contributor" \
-    --assignee "$APP_ID" \
+    --assignee-object-id "$SP_OBJECT_ID" \
     --only-show-errors
 
 # Create linked service for billing storage
