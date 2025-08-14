@@ -104,29 +104,36 @@ echo "--------------------------------------"
 read -p "🔹 Enter Resource Group name for billing resources (or press Enter for 'rg-billing-export'): " BILLING_RG
 BILLING_RG=${BILLING_RG:-"rg-billing-export"}
 
-# Prompt for Azure region
-echo "🌍 Select Azure region for resources:"
-echo "   1. East US 2 (eastus2)"
-echo "   2. West US 2 (westus2)"
-echo "   3. Central US (centralus)"
-echo "   4. North Europe (northeurope)"
-echo "   5. West Europe (westeurope)"
-read -p "Enter your choice (1-5) or press Enter for default (eastus2): " REGION_CHOICE
+# Check if resource group exists and get its location
+echo "📁 Checking resource group '$BILLING_RG'..."
+RG_EXISTS=$(az group exists --name "$BILLING_RG")
 
-case $REGION_CHOICE in
-    1|"") AZURE_REGION="eastus2" ;;
-    2) AZURE_REGION="westus2" ;;
-    3) AZURE_REGION="centralus" ;;
-    4) AZURE_REGION="northeurope" ;;
-    5) AZURE_REGION="westeurope" ;;
-    *) AZURE_REGION="eastus2" ;;
-esac
+if [ "$RG_EXISTS" = "true" ]; then
+    # Resource group exists, get its location
+    AZURE_REGION=$(az group show --name "$BILLING_RG" --query location -o tsv)
+    echo "✅ Using existing resource group in region: $AZURE_REGION"
+else
+    # Resource group doesn't exist, ask for region
+    echo "🌍 Resource group doesn't exist. Select Azure region for new resources:"
+    echo "   1. East US 2 (eastus2)"
+    echo "   2. West US 2 (westus2)"
+    echo "   3. Central US (centralus)"
+    echo "   4. North Europe (northeurope)"
+    echo "   5. West Europe (westeurope)"
+    read -p "Enter your choice (1-5) or press Enter for default (eastus2): " REGION_CHOICE
 
-echo "📍 Using region: $AZURE_REGION"
+    case $REGION_CHOICE in
+        1|"") AZURE_REGION="eastus2" ;;
+        2) AZURE_REGION="westus2" ;;
+        3) AZURE_REGION="centralus" ;;
+        4) AZURE_REGION="northeurope" ;;
+        5) AZURE_REGION="westeurope" ;;
+        *) AZURE_REGION="eastus2" ;;
+    esac
 
-# Create resource group if it doesn't exist
-echo "📁 Creating/Checking resource group '$BILLING_RG'..."
-az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
+    echo "📍 Creating resource group in region: $AZURE_REGION"
+    az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
+fi
 
 # Create storage account for billing exports
 STORAGE_ACCOUNT_NAME="billingstorage$(date +%s | tail -c 6)"
