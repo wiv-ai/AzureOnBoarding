@@ -37,7 +37,6 @@ GO
 
 CREATE EXTERNAL DATA SOURCE BillingDataSource
 WITH (
-    TYPE = BLOB_STORAGE,
     LOCATION = 'https://billingstorage77626.blob.core.windows.net/billing-exports',
     CREDENTIAL = BillingStorageCredential
 );
