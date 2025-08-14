@@ -1,5 +1,5 @@
 -- ========================================================
--- SYNAPSE EXTERNAL TABLE SETUP FOR BILLING DATA
+-- SYNAPSE BILLING DATA SETUP
 -- ========================================================
 -- Run this in Synapse Studio connected to Built-in serverless SQL pool
 -- Workspace: wiv-synapse-billing
@@ -16,6 +16,7 @@ USE BillingAnalytics;
 GO
 
 -- Step 2: Create master key (required for credentials)
+-- If it already exists, comment this out
 CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd123!';
 GO
 
@@ -42,32 +43,11 @@ WITH (
 );
 GO
 
--- Step 5: Drop existing file format if it exists
-IF EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'BillingCSVFormat')
-    DROP EXTERNAL FILE FORMAT BillingCSVFormat;
+-- Step 5: Create a view for easy querying
+-- Using NVARCHAR to handle UTF8 encoding properly
+IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData')
+    DROP VIEW BillingData;
 GO
-
-CREATE EXTERNAL FILE FORMAT BillingCSVFormat
-WITH (
-    FORMAT_TYPE = DELIMITEDTEXT,
-    FORMAT_OPTIONS (
-        FIELD_TERMINATOR = ',',
-        STRING_DELIMITER = '"',
-        FIRST_ROW = 2,
-        USE_TYPE_DEFAULT = TRUE
-    )
-);
-GO
-
--- Step 6: Drop existing external table if it exists
--- Based on actual CSV columns (lowercase)
-IF EXISTS (SELECT * FROM sys.external_tables WHERE name = 'BillingData')
-    DROP EXTERNAL TABLE BillingData;
-GO
-
--- Note: External tables with BLOB_STORAGE don't support wildcards
--- We'll use OPENROWSET instead for querying with wildcards
--- Create a view that uses OPENROWSET for easier querying
 
 CREATE VIEW BillingData AS
 SELECT *
@@ -79,38 +59,58 @@ FROM OPENROWSET(
     FIRSTROW = 2
 )
 WITH (
-    date VARCHAR(100),
-    serviceFamily VARCHAR(200),
-    meterCategory VARCHAR(200),
-    meterSubCategory VARCHAR(200),
-    meterName VARCHAR(500),
-    billingAccountName VARCHAR(200),
-    costCenter VARCHAR(100),
-    resourceGroupName VARCHAR(200),
-    resourceLocation VARCHAR(100),
-    consumedService VARCHAR(200),
-    ResourceId VARCHAR(1000),
-    chargeType VARCHAR(100),
-    publisherType VARCHAR(100),
-    quantity VARCHAR(100),
-    costInBillingCurrency VARCHAR(100),
-    costInUsd VARCHAR(100),
-    PayGPrice VARCHAR(100),
-    billingCurrency VARCHAR(10),
-    subscriptionName VARCHAR(200),
-    SubscriptionId VARCHAR(100),
-    ProductName VARCHAR(500),
-    frequency VARCHAR(100),
-    unitOfMeasure VARCHAR(100),
-    tags VARCHAR(MAX)
+    date NVARCHAR(100),
+    serviceFamily NVARCHAR(200),
+    meterCategory NVARCHAR(200),
+    meterSubCategory NVARCHAR(200),
+    meterName NVARCHAR(500),
+    billingAccountName NVARCHAR(200),
+    costCenter NVARCHAR(100),
+    resourceGroupName NVARCHAR(200),
+    resourceLocation NVARCHAR(100),
+    consumedService NVARCHAR(200),
+    ResourceId NVARCHAR(1000),
+    chargeType NVARCHAR(100),
+    publisherType NVARCHAR(100),
+    quantity NVARCHAR(100),
+    costInBillingCurrency NVARCHAR(100),
+    costInUsd NVARCHAR(100),
+    PayGPrice NVARCHAR(100),
+    billingCurrency NVARCHAR(10),
+    subscriptionName NVARCHAR(200),
+    SubscriptionId NVARCHAR(100),
+    ProductName NVARCHAR(500),
+    frequency NVARCHAR(100),
+    unitOfMeasure NVARCHAR(100),
+    tags NVARCHAR(4000)
 ) AS BillingData;
+GO
+
+-- Step 6: Create additional views for common queries
+-- View for current month's data
+CREATE VIEW CurrentMonthBilling AS
+SELECT *
+FROM OPENROWSET(
+    BULK 'billing-data/DailyBillingExport/20250801-20250831/*.csv',
+    DATA_SOURCE = 'BillingDataSource',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    date NVARCHAR(100),
+    serviceFamily NVARCHAR(200),
+    resourceGroupName NVARCHAR(200),
+    costInUsd NVARCHAR(100)
+) AS BillingData
+WHERE date IS NOT NULL AND date != 'date';
 GO
 
 -- ========================================================
 -- SAMPLE QUERIES
 -- ========================================================
 
--- Query 1: Test the external table
+-- Query 1: Test the view
 SELECT TOP 10 * FROM BillingData;
 
 -- Query 2: Daily cost summary
@@ -152,3 +152,21 @@ FROM BillingData
 WHERE date IS NOT NULL AND date != 'date'
 GROUP BY YEAR(TRY_CAST(date AS DATE)), MONTH(TRY_CAST(date AS DATE))
 ORDER BY Year DESC, Month DESC;
+
+-- Query 6: Direct OPENROWSET query (if view doesn't work)
+-- This can be used directly without creating the view
+SELECT TOP 100 *
+FROM OPENROWSET(
+    BULK 'billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
+    DATA_SOURCE = 'BillingDataSource',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    date NVARCHAR(100),
+    serviceFamily NVARCHAR(200),
+    meterCategory NVARCHAR(200),
+    resourceGroupName NVARCHAR(200),
+    costInUsd NVARCHAR(100)
+) AS BillingData;
