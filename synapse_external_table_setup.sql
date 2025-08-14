@@ -4,23 +4,25 @@
 -- Run this in Synapse Studio connected to Built-in serverless SQL pool
 -- Workspace: wiv-synapse-billing
 
--- Step 1: Create or use a database
-CREATE DATABASE IF NOT EXISTS BillingAnalytics;
+-- Step 1: Create database (drop if exists for clean setup)
+-- Note: Comment out the DROP if you want to preserve existing database
+-- DROP DATABASE IF EXISTS BillingAnalytics;
+-- GO
+
+CREATE DATABASE BillingAnalytics;
 GO
 
 USE BillingAnalytics;
 GO
 
 -- Step 2: Create master key (required for credentials)
-IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-BEGIN
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd123!';
-END
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd123!';
 GO
 
--- Step 3: Create database scoped credential with SAS token
+-- Step 3: Drop existing credential if it exists (for clean setup)
 -- Note: This SAS token is valid for 30 days from creation
-DROP DATABASE SCOPED CREDENTIAL IF EXISTS BillingStorageCredential;
+IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
+    DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential;
 GO
 
 CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
@@ -28,8 +30,9 @@ WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
 SECRET = 'se=2025-09-13T14%3A23Z&sp=rl&sv=2022-11-02&sr=c&sig=4mNum/LPqCmlAp4Cw/PPeRIgx/4u9JmAnMAkrLFWbBc%3D';
 GO
 
--- Step 4: Create external data source pointing to blob storage
-DROP EXTERNAL DATA SOURCE IF EXISTS BillingDataSource;
+-- Step 4: Drop existing data source if it exists
+IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
+    DROP EXTERNAL DATA SOURCE BillingDataSource;
 GO
 
 CREATE EXTERNAL DATA SOURCE BillingDataSource
@@ -40,8 +43,9 @@ WITH (
 );
 GO
 
--- Step 5: Create external file format for CSV
-DROP EXTERNAL FILE FORMAT IF EXISTS BillingCSVFormat;
+-- Step 5: Drop existing file format if it exists
+IF EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'BillingCSVFormat')
+    DROP EXTERNAL FILE FORMAT BillingCSVFormat;
 GO
 
 CREATE EXTERNAL FILE FORMAT BillingCSVFormat
@@ -56,9 +60,10 @@ WITH (
 );
 GO
 
--- Step 6: Create external table with correct schema
+-- Step 6: Drop existing external table if it exists
 -- Based on actual CSV columns (lowercase)
-DROP EXTERNAL TABLE IF EXISTS BillingData;
+IF EXISTS (SELECT * FROM sys.external_tables WHERE name = 'BillingData')
+    DROP EXTERNAL TABLE BillingData;
 GO
 
 CREATE EXTERNAL TABLE BillingData (
