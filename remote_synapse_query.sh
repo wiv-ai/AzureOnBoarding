@@ -5,8 +5,8 @@ echo "================================"
 
 # Configuration
 TENANT_ID="ba153ff0-3397-4ef5-a214-dd33e8c37bff"
-APP_ID="030cce2a-e94a-4d6f-9455-f8577c1721cb"
-CLIENT_SECRET="Kxk8Q~LzvG1jl9halVfv4OH.ZgSshbZER108Hcuh"
+APP_ID="554b11c1-18f9-46b5-a096-30e0a2cfae6f"
+CLIENT_SECRET="tmC8Q~xjjkGx9MD2mPY5OeUh.HcbeqlReT6C7ams"
 SYNAPSE_WORKSPACE="wiv-synapse-billing"
 STORAGE_ACCOUNT="billingstorage73919"
 CONTAINER="billing-exports"
