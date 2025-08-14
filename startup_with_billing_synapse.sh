@@ -405,6 +405,160 @@ SQL_QUERY="SELECT TOP 10 * FROM OPENROWSET(
     PARSER_VERSION = '2.0'
 ) AS BillingData"
 
+# Generate SAS token for Synapse access
+echo ""
+echo "🔑 Generating SAS token for Synapse access..."
+STORAGE_KEY=$(az storage account keys list \
+    --account-name "$STORAGE_ACCOUNT_NAME" \
+    --resource-group "$BILLING_RG" \
+    --query "[0].value" \
+    --output tsv)
+
+if [ -n "$STORAGE_KEY" ]; then
+    SAS_EXPIRY=$(date -u -d '30 days' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -v +30d '+%Y-%m-%dT%H:%MZ')
+    SAS_TOKEN=$(az storage container generate-sas \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --name "$CONTAINER_NAME" \
+        --permissions rl \
+        --expiry "$SAS_EXPIRY" \
+        --account-key "$STORAGE_KEY" \
+        --output tsv)
+    echo "✅ SAS token generated (valid for 30 days)"
+else
+    echo "⚠️  Could not generate SAS token"
+    SAS_TOKEN=""
+fi
+
+# Save Synapse setup script
+cat > synapse_billing_setup.sql <<EOF
+-- ========================================================
+-- SYNAPSE BILLING DATA SETUP
+-- ========================================================
+-- Auto-generated on: $(date)
+-- Run this in Synapse Studio connected to Built-in serverless SQL pool
+-- Workspace: $SYNAPSE_WORKSPACE
+-- Storage Account: $STORAGE_ACCOUNT_NAME
+-- Container: $CONTAINER_NAME
+
+-- Step 1: Create database
+CREATE DATABASE BillingAnalytics;
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Step 2: Create master key (if not exists)
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd\$(openssl rand -hex 4)!';
+GO
+
+-- Step 3: Create database scoped credential with SAS token
+IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
+    DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential;
+GO
+
+CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
+WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
+SECRET = '$SAS_TOKEN';
+GO
+
+-- Step 4: Create external data source
+IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
+    DROP EXTERNAL DATA SOURCE BillingDataSource;
+GO
+
+CREATE EXTERNAL DATA SOURCE BillingDataSource
+WITH (
+    LOCATION = 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME',
+    CREDENTIAL = BillingStorageCredential
+);
+GO
+
+-- Step 5: Create view for billing data
+IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData')
+    DROP VIEW BillingData;
+GO
+
+CREATE VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK 'billing-data/DailyBillingExport/*/*.csv',
+    DATA_SOURCE = 'BillingDataSource',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    date NVARCHAR(100),
+    serviceFamily NVARCHAR(200),
+    meterCategory NVARCHAR(200),
+    meterSubCategory NVARCHAR(200),
+    meterName NVARCHAR(500),
+    billingAccountName NVARCHAR(200),
+    costCenter NVARCHAR(100),
+    resourceGroupName NVARCHAR(200),
+    resourceLocation NVARCHAR(100),
+    consumedService NVARCHAR(200),
+    ResourceId NVARCHAR(1000),
+    chargeType NVARCHAR(100),
+    publisherType NVARCHAR(100),
+    quantity NVARCHAR(100),
+    costInBillingCurrency NVARCHAR(100),
+    costInUsd NVARCHAR(100),
+    PayGPrice NVARCHAR(100),
+    billingCurrency NVARCHAR(10),
+    subscriptionName NVARCHAR(200),
+    SubscriptionId NVARCHAR(100),
+    ProductName NVARCHAR(500),
+    frequency NVARCHAR(100),
+    unitOfMeasure NVARCHAR(100),
+    tags NVARCHAR(4000)
+) AS BillingData;
+GO
+
+-- Test query
+SELECT TOP 10 * FROM BillingData;
+EOF
+
+echo "✅ Synapse setup script saved to: synapse_billing_setup.sql"
+
+# Save Python remote query client configuration
+cat > synapse_config.py <<EOF
+# Auto-generated Synapse configuration
+# Created: $(date)
+
+SYNAPSE_CONFIG = {
+    'tenant_id': '$TENANT_ID',
+    'client_id': '$APP_ID',
+    'client_secret': '$CLIENT_SECRET',
+    'workspace_name': '$SYNAPSE_WORKSPACE',
+    'database_name': 'BillingAnalytics',
+    'storage_account': '$STORAGE_ACCOUNT_NAME',
+    'container': '$CONTAINER_NAME',
+    'resource_group': '$BILLING_RG',
+    'subscription_id': '$APP_SUBSCRIPTION_ID'
+}
+
+# Connection string for ODBC
+CONNECTION_STRING = f"""
+DRIVER={{ODBC Driver 18 for SQL Server}};
+SERVER={SYNAPSE_CONFIG['workspace_name']}-ondemand.sql.azuresynapse.net;
+DATABASE={SYNAPSE_CONFIG['database_name']};
+UID={SYNAPSE_CONFIG['client_id']};
+PWD={SYNAPSE_CONFIG['client_secret']};
+Authentication=ActiveDirectoryServicePrincipal;
+Encrypt=yes;
+TrustServerCertificate=no;
+"""
+
+print("Synapse Configuration:")
+print(f"  Workspace: {SYNAPSE_CONFIG['workspace_name']}")
+print(f"  Storage: {SYNAPSE_CONFIG['storage_account']}")
+print(f"  Database: {SYNAPSE_CONFIG['database_name']}")
+print(f"  Client ID: {SYNAPSE_CONFIG['client_id']}")
+EOF
+
+echo "✅ Python configuration saved to: synapse_config.py"
+
 # Save query for reference
 cat > billing_queries.sql <<EOF
 -- Query billing data directly from storage (serverless SQL pool)
@@ -643,9 +797,12 @@ echo "   2. Access Synapse Studio: https://web.azuresynapse.net"
 echo "   3. Use the queries from 'billing_queries.sql' - they work immediately!"
 echo "      (No setup needed - serverless SQL pool queries CSV files directly)"
 echo ""
-echo "📊 Ready-to-use queries are saved in: billing_queries.sql"
-echo "   - View all billing data"
-echo "   - Daily cost summary"
-echo "   - Top expensive resources"
-echo "   - Monthly cost trend"
+echo "📊 Generated files for your use:"
+echo "   - billing_queries.sql: Ready-to-use Synapse queries"
+echo "   - synapse_billing_setup.sql: Complete Synapse setup script with SAS token"
+echo "   - synapse_config.py: Python configuration for remote queries"
+echo ""
+echo "🚀 Next steps for remote querying:"
+echo "   1. Run synapse_billing_setup.sql in Synapse Studio"
+echo "   2. Use synapse_config.py with the Python client for remote access"
 echo "============================================================"
