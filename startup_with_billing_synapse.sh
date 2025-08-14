@@ -234,8 +234,8 @@ echo "🔷 Setting up Azure Synapse Analytics Workspace..."
 echo "--------------------------------------"
 
 # Prompt for Synapse workspace name
-read -p "🔹 Enter Synapse workspace name (or press Enter for 'synapse-billing-analytics'): " SYNAPSE_WORKSPACE
-SYNAPSE_WORKSPACE=${SYNAPSE_WORKSPACE:-"synapse-billing-analytics"}
+read -p "🔹 Enter Synapse workspace name (or press Enter for 'wiv-synapse-billing'): " SYNAPSE_WORKSPACE
+SYNAPSE_WORKSPACE=${SYNAPSE_WORKSPACE:-"wiv-synapse-billing"}
 
 # Create Synapse workspace
 echo "🏗️ Creating Synapse workspace '$SYNAPSE_WORKSPACE'..."
