@@ -654,13 +654,44 @@ TrustServerCertificate=no;
 Connection Timeout=60;
 """
 
-# Create database
+# Create database with retry logic
 print("📦 Creating BillingAnalytics database...")
-db_commands = [
-    "CREATE DATABASE BillingAnalytics"
-]
+db_created = False
+for retry in range(3):
+    try:
+        conn = pyodbc.connect(master_conn_str, autocommit=True)
+        cursor = conn.cursor()
+        
+        # Check if database already exists
+        cursor.execute("SELECT name FROM sys.databases WHERE name = 'BillingAnalytics'")
+        if cursor.fetchone():
+            print("✅ BillingAnalytics database already exists!")
+            db_created = True
+        else:
+            # Try to create database
+            cursor.execute("CREATE DATABASE BillingAnalytics")
+            print("✅ BillingAnalytics database created!")
+            db_created = True
+        
+        cursor.close()
+        conn.close()
+        break
+    except pyodbc.Error as e:
+        if "already exists" in str(e):
+            print("✅ Database already exists!")
+            db_created = True
+            break
+        elif "Could not obtain exclusive lock" in str(e) and retry < 2:
+            print(f"⏳ Database is busy, retrying in 5 seconds... (attempt {retry + 1}/3)")
+            time.sleep(5)
+        else:
+            print(f"⚠️ Database creation issue: {str(e)[:100]}")
+            if retry < 2:
+                time.sleep(5)
 
-execute_sql_commands(master_conn_str, db_commands)
+if not db_created:
+    print("⚠️ Could not create database automatically. It may already exist or need manual creation.")
+    print("   Continue with setup anyway...")
 
 # Connection string for BillingAnalytics database
 billing_conn_str = f"""
@@ -677,66 +708,101 @@ Connection Timeout=60;
 
 # Setup commands - Simplified for Managed Identity (no SAS tokens needed!)
 print("\n🔧 Setting up database objects with Managed Identity...")
-setup_commands = [
-    # Create master key
-    f"CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'",
-    
-    # Drop existing view if exists
-    """IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData')
-       DROP VIEW BillingData""",
-    
-    # Create view using abfss:// protocol with Managed Identity (no credentials needed!)
-    f"""CREATE VIEW BillingData AS
-       SELECT *
-       FROM OPENROWSET(
-           BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
-           FORMAT = 'CSV',
-           PARSER_VERSION = '2.0',
-           FIRSTROW = 2
-       )
-       WITH (
-           date NVARCHAR(100),
-           serviceFamily NVARCHAR(200),
-           meterCategory NVARCHAR(200),
-           meterSubCategory NVARCHAR(200),
-           meterName NVARCHAR(500),
-           billingAccountName NVARCHAR(200),
-           costCenter NVARCHAR(100),
-           resourceGroupName NVARCHAR(200),
-           resourceLocation NVARCHAR(100),
-           consumedService NVARCHAR(200),
-           ResourceId NVARCHAR(1000),
-           chargeType NVARCHAR(100),
-           publisherType NVARCHAR(100),
-           quantity NVARCHAR(100),
-           costInBillingCurrency NVARCHAR(100),
-           costInUsd NVARCHAR(100),
-           PayGPrice NVARCHAR(100),
-           billingCurrency NVARCHAR(10),
-           subscriptionName NVARCHAR(200),
-           SubscriptionId NVARCHAR(100),
-           ProductName NVARCHAR(500),
-           frequency NVARCHAR(100),
-           unitOfMeasure NVARCHAR(100),
-           tags NVARCHAR(4000)
-       ) AS BillingData"""
-]
 
-if execute_sql_commands(billing_conn_str, setup_commands):
+# Wait a moment for database to be ready
+time.sleep(3)
+
+# Try to connect and setup with retry
+setup_success = False
+for retry in range(3):
+    try:
+        conn = pyodbc.connect(billing_conn_str, autocommit=True)
+        cursor = conn.cursor()
+        
+        # Create master key
+        try:
+            cursor.execute(f"CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'")
+            print("✅ Master key created")
+        except pyodbc.Error as e:
+            if "already exists" in str(e):
+                print("✅ Master key already exists")
+            else:
+                print(f"⚠️ Master key: {str(e)[:100]}")
+        
+        # Drop and create view
+        try:
+            cursor.execute("IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData') DROP VIEW BillingData")
+        except:
+            pass
+        
+        cursor.execute(f"""
+            CREATE VIEW BillingData AS
+            SELECT *
+            FROM OPENROWSET(
+                BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                FORMAT = 'CSV',
+                PARSER_VERSION = '2.0',
+                FIRSTROW = 2
+            )
+            WITH (
+                date NVARCHAR(100),
+                serviceFamily NVARCHAR(200),
+                meterCategory NVARCHAR(200),
+                meterSubCategory NVARCHAR(200),
+                meterName NVARCHAR(500),
+                billingAccountName NVARCHAR(200),
+                costCenter NVARCHAR(100),
+                resourceGroupName NVARCHAR(200),
+                resourceLocation NVARCHAR(100),
+                consumedService NVARCHAR(200),
+                ResourceId NVARCHAR(1000),
+                chargeType NVARCHAR(100),
+                publisherType NVARCHAR(100),
+                quantity NVARCHAR(100),
+                costInBillingCurrency NVARCHAR(100),
+                costInUsd NVARCHAR(100),
+                PayGPrice NVARCHAR(100),
+                billingCurrency NVARCHAR(10),
+                subscriptionName NVARCHAR(200),
+                SubscriptionId NVARCHAR(100),
+                ProductName NVARCHAR(500),
+                frequency NVARCHAR(100),
+                unitOfMeasure NVARCHAR(100),
+                tags NVARCHAR(4000)
+            ) AS BillingData
+        """)
+        print("✅ BillingData view created")
+        
+        cursor.close()
+        conn.close()
+        setup_success = True
+        break
+        
+    except pyodbc.Error as e:
+        if "Login failed" in str(e) and retry < 2:
+            print(f"⏳ Waiting for permissions to propagate... (attempt {retry + 1}/3)")
+            time.sleep(10)
+        else:
+            print(f"⚠️ Setup issue: {str(e)[:100]}")
+            if retry < 2:
+                time.sleep(5)
+
+if setup_success:
     print("\n✅ Synapse database setup completed successfully!")
     
     # Test the view
     print("\n🔍 Testing the view...")
     try:
-        conn = pyodbc.connect(billing_conn_str)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as RecordCount FROM BillingData")
-        row = cursor.fetchone()
+        test_conn = pyodbc.connect(billing_conn_str)
+        test_cursor = test_conn.cursor()
+        test_cursor.execute("SELECT COUNT(*) as RecordCount FROM BillingData")
+        row = test_cursor.fetchone()
         print(f"✅ View is working! Found {row[0]} billing records")
-        cursor.close()
-        conn.close()
+        test_cursor.close()
+        test_conn.close()
     except Exception as e:
-        print(f"⚠️  Could not test view: {e}")
+        print(f"⚠️  Could not test view: {str(e)[:100]}")
+        print("   This is normal if no billing data has been exported yet")
 else:
     print("\n❌ Some steps failed, but setup may still be usable")
 
