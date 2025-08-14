@@ -282,21 +282,8 @@ fi
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
-# Get current client IP
-echo "🔍 Getting current client IP address..."
-CLIENT_IP=$(curl -s https://ipinfo.io/ip)
-echo "📍 Your IP: $CLIENT_IP"
-
-# Create firewall rule for current client IP
+# Create firewall rules
 echo "🔥 Configuring firewall rules..."
-echo "  - Adding rule for your IP address..."
-az synapse workspace firewall-rule create \
-    --name "ClientIP" \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --start-ip-address "$CLIENT_IP" \
-    --end-ip-address "$CLIENT_IP" \
-    --only-show-errors
 
 # Create firewall rule to allow Azure services
 echo "  - Adding rule for Azure services..."
