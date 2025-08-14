@@ -6,10 +6,10 @@ echo "======================================"
 
 # Configuration
 TENANT_ID="ba153ff0-3397-4ef5-a214-dd33e8c37bff"
-CLIENT_ID="030cce2a-e94a-4d6f-9455-f8577c1721cb"
-CLIENT_SECRET="Kxk8Q~LzvG1jl9halVfv4OH.ZgSshbZER108Hcuh"
+CLIENT_ID="554b11c1-18f9-46b5-a096-30e0a2cfae6f"
+CLIENT_SECRET="tmC8Q~xjjkGx9MD2mPY5OeUh.HcbeqlReT6C7ams"
 SYNAPSE_WORKSPACE="wiv-synapse-billing"
-STORAGE_ACCOUNT="billingstorage73919"
+STORAGE_ACCOUNT="billingstorage77626"
 RESOURCE_GROUP="wiv-rg"
 SUBSCRIPTION_ID="62b32106-4b98-47ea-9ac5-4181f33ae2af"
 
@@ -71,7 +71,7 @@ query_with_az_cli() {
         echo "✅ Logged in successfully"
         
         # Create a SQL script in Synapse
-        QUERY='SELECT TOP 10 * FROM OPENROWSET(BULK '\''https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport_b25100c0-b66f-4391-ae32-2661f9e8e729.csv'\'', FORMAT = '\''CSV'\'', PARSER_VERSION = '\''2.0'\'', FIRSTROW = 2) WITH (Date NVARCHAR(100), ServiceFamily NVARCHAR(100), ResourceGroup NVARCHAR(100), CostInUSD NVARCHAR(50)) AS BillingData'
+        QUERY='SELECT TOP 10 * FROM OPENROWSET(BULK '\''https://billingstorage77626.blob.core.windows.net/billing-exports/DailyBillingExport*.csv'\'', FORMAT = '\''CSV'\'', PARSER_VERSION = '\''2.0'\'', FIRSTROW = 2) WITH (Date NVARCHAR(100), ServiceFamily NVARCHAR(100), ResourceGroup NVARCHAR(100), CostInUSD NVARCHAR(50)) AS BillingData'
         
         echo "Creating SQL script in Synapse..."
         
