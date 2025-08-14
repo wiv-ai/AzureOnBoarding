@@ -9,13 +9,13 @@
 WITH LatestFile AS (
     SELECT MAX(filepath(1)) as LatestPath
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS files
 )
 SELECT * FROM OPENROWSET(
-    BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+    BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
     FORMAT = 'CSV',
     HEADER_ROW = TRUE
 ) AS BillingData
@@ -26,13 +26,13 @@ WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
 WITH LatestFile AS (
     SELECT MAX(filepath(1)) as LatestPath
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS files
 )
 SELECT * FROM OPENROWSET(
-    BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+    BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
     FORMAT = 'CSV',
     HEADER_ROW = TRUE
 ) AS BillingData
@@ -43,7 +43,7 @@ WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
 WITH LatestFile AS (
     SELECT MAX(filepath(1)) as LatestPath
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS files
@@ -55,7 +55,7 @@ SELECT
     SUM(CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
     COUNT(DISTINCT ResourceId) as ResourceCount
 FROM OPENROWSET(
-    BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+    BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
     FORMAT = 'CSV',
     HEADER_ROW = TRUE
 ) AS BillingData
@@ -68,7 +68,7 @@ ORDER BY BillingDate DESC
 WITH LatestFile AS (
     SELECT MAX(filepath(1)) as LatestPath
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS files
@@ -78,7 +78,7 @@ CurrentWeek AS (
         ServiceFamily,
         SUM(CAST(CostInUSD AS FLOAT)) as CurrentCost
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS BillingData
@@ -91,7 +91,7 @@ PreviousWeek AS (
         ServiceFamily,
         SUM(CAST(CostInUSD AS FLOAT)) as PreviousCost
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS BillingData
@@ -117,7 +117,7 @@ ORDER BY ThisWeekCost DESC
 WITH LatestFile AS (
     SELECT MAX(filepath(1)) as LatestPath
     FROM OPENROWSET(
-        BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+        BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
         FORMAT = 'CSV',
         HEADER_ROW = TRUE
     ) AS files
@@ -127,7 +127,7 @@ SELECT
     SUM(CAST(CostInUSD AS FLOAT)) as DailyCost,
     SUM(SUM(CAST(CostInUSD AS FLOAT))) OVER (ORDER BY CAST(Date AS DATE)) as CumulativeCost
 FROM OPENROWSET(
-    BULK 'https://billingstorage94255.blob.core.windows.net/billing-exports/billing-data/*.csv',
+    BULK 'https://billingstorage95541.blob.core.windows.net/billing-exports/billing-data/*.csv',
     FORMAT = 'CSV',
     HEADER_ROW = TRUE
 ) AS BillingData
