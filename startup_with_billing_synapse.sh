@@ -554,7 +554,7 @@ def wait_for_synapse():
             Authentication=ActiveDirectoryServicePrincipal;
             Encrypt=yes;
             TrustServerCertificate=no;
-            Connection Timeout=30;
+            Connection Timeout=60;
             """
             
             conn = pyodbc.connect(test_conn_str, autocommit=True)
