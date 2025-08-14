@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo ""
-echo "🚀 Azure Onboarding Script Starting..."
+echo "🚀 Azure Onboarding Script with Billing & Synapse Starting..."
 echo "--------------------------------------"
 
 # Login to Azure (if needed)
