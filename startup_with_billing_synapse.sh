@@ -354,15 +354,12 @@ az synapse role assignment create \
     --assignee-object-id "$SP_OBJECT_ID" \
     --only-show-errors
 
-# Configure authentication for storage access
+# Configure Managed Identity authentication (NO TOKENS NEEDED!)
 echo ""
-echo "🔑 Configuring authentication for Synapse storage access..."
-
-# Option 1: Use Managed Identity (no expiration)
-AUTH_METHOD="ManagedIdentity"
+echo "🔑 Configuring Managed Identity authentication (never expires!)..."
 
 # Grant the service principal access to the storage account
-echo "Setting up Managed Identity access..."
+echo "Setting up Storage Blob Data Reader permissions..."
 az role assignment create \
     --role "Storage Blob Data Reader" \
     --assignee "$SP_OBJECT_ID" \
@@ -382,30 +379,7 @@ if [ -n "$SYNAPSE_IDENTITY" ]; then
         --assignee "$SYNAPSE_IDENTITY" \
         --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
         --only-show-errors 2>/dev/null || echo "⚠️  Synapse role may already be assigned"
-    echo "✅ Managed Identity configured (never expires)"
-fi
-
-# Option 2: Generate long-term SAS token as fallback (maximum 5 years)
-echo "Generating backup SAS token..."
-STORAGE_KEY=$(az storage account keys list \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --resource-group "$BILLING_RG" \
-    --query "[0].value" \
-    --output tsv 2>/dev/null)
-
-if [ -n "$STORAGE_KEY" ]; then
-    # Set expiry to 5 years (maximum allowed)
-    SAS_EXPIRY=$(date -u -d '5 years' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -v +1825d '+%Y-%m-%dT%H:%MZ')
-    SAS_TOKEN=$(az storage container generate-sas \
-        --account-name "$STORAGE_ACCOUNT_NAME" \
-        --name "$CONTAINER_NAME" \
-        --permissions rl \
-        --expiry "$SAS_EXPIRY" \
-        --account-key "$STORAGE_KEY" \
-        --output tsv 2>/dev/null)
-    echo "✅ Backup SAS token generated (valid for 5 years)"
-else
-    SAS_TOKEN=""
+    echo "✅ Managed Identity configured - NO EXPIRATION, NO TOKENS!"
 fi
 
 # Create linked service for billing storage
@@ -490,7 +464,6 @@ config = {
     'client_secret': '$CLIENT_SECRET',
     'storage_account': '$STORAGE_ACCOUNT_NAME',
     'container': '$CONTAINER_NAME',
-    'sas_token': '$SAS_TOKEN',
     'master_key_password': '$MASTER_KEY_PASSWORD'
 }
 
@@ -611,50 +584,21 @@ TrustServerCertificate=no;
 Connection Timeout=60;
 """
 
-# Setup commands
-print("\n🔧 Setting up database objects...")
+# Setup commands - Simplified for Managed Identity (no SAS tokens needed!)
+print("\n🔧 Setting up database objects with Managed Identity...")
 setup_commands = [
     # Create master key
     f"CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'",
-    
-    # Drop existing credential if exists
-    """IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
-       DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential""",
-    
-    # Drop existing managed identity credential if exists  
-    """IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceManagedIdentity')
-       DROP DATABASE SCOPED CREDENTIAL WorkspaceManagedIdentity""",
-    
-    # Create managed identity credential (never expires!)
-    """CREATE DATABASE SCOPED CREDENTIAL WorkspaceManagedIdentity
-        WITH IDENTITY = 'Managed Identity'""",
-    
-    # Also create SAS credential as backup
-    f"""CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
-        WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
-        SECRET = '{config['sas_token']}'""",
-    
-    # Drop existing data source if exists
-    """IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
-       DROP EXTERNAL DATA SOURCE BillingDataSource""",
-    
-    # Create data source using Managed Identity (preferred)
-    f"""CREATE EXTERNAL DATA SOURCE BillingDataSource
-        WITH (
-            LOCATION = 'https://{config['storage_account']}.blob.core.windows.net/{config['container']}',
-            CREDENTIAL = WorkspaceManagedIdentity
-        )""",
     
     # Drop existing view if exists
     """IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData')
        DROP VIEW BillingData""",
     
-    # Create view
-    """CREATE VIEW BillingData AS
+    # Create view using abfss:// protocol with Managed Identity (no credentials needed!)
+    f"""CREATE VIEW BillingData AS
        SELECT *
        FROM OPENROWSET(
-           BULK 'billing-data/DailyBillingExport/20250801-20250831/*.csv',
-           DATA_SOURCE = 'BillingDataSource',
+           BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
            FORMAT = 'CSV',
            PARSER_VERSION = '2.0',
            FIRSTROW = 2
@@ -793,30 +737,12 @@ GO
 CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
 GO
 
--- Option 1: Managed Identity (NEVER EXPIRES - Recommended!)
-CREATE DATABASE SCOPED CREDENTIAL WorkspaceManagedIdentity
-WITH IDENTITY = 'Managed Identity';
-GO
-
--- Option 2: SAS Token (5-year backup)
-CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
-WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
-SECRET = '$SAS_TOKEN';
-GO
-
--- Create data source using Managed Identity
-CREATE EXTERNAL DATA SOURCE BillingDataSource
-WITH (
-    LOCATION = 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME',
-    CREDENTIAL = WorkspaceManagedIdentity  -- Uses Managed Identity (no expiration!)
-);
-GO
-
+-- Using Managed Identity with abfss:// protocol (NEVER EXPIRES!)
+-- No credentials or data sources needed - direct access via Managed Identity
 CREATE VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
-    BULK 'billing-data/DailyBillingExport/20250801-20250831/*.csv',
-    DATA_SOURCE = 'BillingDataSource',
+    BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     FIRSTROW = 2
@@ -1113,9 +1039,9 @@ echo "   - SQL Admin User:         $SQL_ADMIN_USER"
 echo "   - SQL Admin Password:     $SQL_ADMIN_PASSWORD"
 echo "   - Data Lake Storage:      $SYNAPSE_STORAGE"
 echo ""
-echo "🔐 AUTHENTICATION (NO EXPIRATION!):"
-echo "   ✨ Primary: Managed Identity (NEVER EXPIRES)"
-echo "   📅 Backup: SAS Token (5-year validity)"
+echo "🔐 AUTHENTICATION:"
+echo "   ✨ Managed Identity with abfss:// protocol"
+echo "   ✅ NO TOKENS, NO EXPIRATION, NO MAINTENANCE!"
 echo ""
 echo "📄 Assigned Roles:"
 echo "   - Cost Management Reader"
@@ -1133,14 +1059,15 @@ echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
 echo "   3. Query data: SELECT * FROM BillingAnalytics.dbo.BillingData"
 echo "   4. Access Synapse Studio: https://web.azuresynapse.net"
 echo ""
-echo "📊 Generated files for your use:"
+echo "📊 Generated files:"
 echo "   - billing_queries.sql: Ready-to-use Synapse queries"
-echo "   - synapse_billing_setup.sql: Manual backup script (if needed)"
+echo "   - synapse_billing_setup.sql: Manual SQL script (if automation fails)"
 echo "   - synapse_config.py: Python configuration for remote queries"
 echo ""
-echo "🚀 Benefits of Managed Identity:"
-echo "   ✅ Never expires - no maintenance required"
-echo "   ✅ More secure - no secrets to manage"
-echo "   ✅ Automatic - works immediately"
-echo "   ✅ Best practice - recommended by Microsoft"
+echo "🚀 Managed Identity Benefits:"
+echo "   ✅ NEVER EXPIRES - Works forever without maintenance"
+echo "   ✅ NO TOKENS - No SAS tokens or keys to manage"
+echo "   ✅ MORE SECURE - Azure native authentication"
+echo "   ✅ AUTOMATIC - Direct access via abfss:// protocol"
+echo "   ✅ BEST PRACTICE - Microsoft recommended approach"
 echo "============================================================"
