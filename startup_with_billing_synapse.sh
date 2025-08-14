@@ -288,6 +288,25 @@ sleep 30
 # Create firewall rules
 echo "🔥 Configuring firewall rules..."
 
+# Get current client IP
+CLIENT_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "")
+if [ -z "$CLIENT_IP" ]; then
+    # Try alternative method
+    CLIENT_IP=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null || echo "")
+fi
+
+# Create firewall rule for current client IP
+if [ -n "$CLIENT_IP" ]; then
+    echo "  - Adding rule for your IP address: $CLIENT_IP"
+    az synapse workspace firewall-rule create \
+        --name "ClientIP_$(echo $CLIENT_IP | tr . _)" \
+        --workspace-name "$SYNAPSE_WORKSPACE" \
+        --resource-group "$BILLING_RG" \
+        --start-ip-address "$CLIENT_IP" \
+        --end-ip-address "$CLIENT_IP" \
+        --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+fi
+
 # Create firewall rule to allow Azure services
 echo "  - Adding rule for Azure services..."
 az synapse workspace firewall-rule create \
@@ -296,7 +315,7 @@ az synapse workspace firewall-rule create \
     --resource-group "$BILLING_RG" \
     --start-ip-address "0.0.0.0" \
     --end-ip-address "0.0.0.0" \
-    --only-show-errors
+    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
 
 # Create firewall rule to allow all IPs (for remote access)
 echo "  - Adding rule for all IPs (remote access)..."
@@ -306,11 +325,13 @@ az synapse workspace firewall-rule create \
     --resource-group "$BILLING_RG" \
     --start-ip-address "0.0.0.0" \
     --end-ip-address "255.255.255.255" \
-    --only-show-errors
+    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
 
-# Wait a moment for firewall rules to take effect
-echo "⏳ Waiting for firewall rules to take effect..."
-sleep 10
+# Wait longer for firewall rules to propagate
+echo "⏳ Waiting 30 seconds for firewall rules to fully propagate..."
+sleep 30
+
+echo "✅ Firewall rules configured"
 
 # ===========================
 # SYNAPSE PERMISSIONS SETUP
