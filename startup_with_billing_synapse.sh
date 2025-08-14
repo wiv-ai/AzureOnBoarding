@@ -351,6 +351,60 @@ az synapse role assignment create \
     --assignee-object-id "$SP_OBJECT_ID" \
     --only-show-errors
 
+# Configure authentication for storage access
+echo ""
+echo "🔑 Configuring authentication for Synapse storage access..."
+
+# Option 1: Use Managed Identity (no expiration)
+AUTH_METHOD="ManagedIdentity"
+
+# Grant the service principal access to the storage account
+echo "Setting up Managed Identity access..."
+az role assignment create \
+    --role "Storage Blob Data Reader" \
+    --assignee "$SP_OBJECT_ID" \
+    --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
+    --only-show-errors 2>/dev/null || echo "⚠️  SP role may already be assigned"
+
+# Also grant Synapse workspace managed identity access
+SYNAPSE_IDENTITY=$(az synapse workspace show \
+    --name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$SYNAPSE_RG" \
+    --query "identity.principalId" \
+    --output tsv 2>/dev/null)
+
+if [ -n "$SYNAPSE_IDENTITY" ]; then
+    az role assignment create \
+        --role "Storage Blob Data Reader" \
+        --assignee "$SYNAPSE_IDENTITY" \
+        --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
+        --only-show-errors 2>/dev/null || echo "⚠️  Synapse role may already be assigned"
+    echo "✅ Managed Identity configured (never expires)"
+fi
+
+# Option 2: Generate long-term SAS token as fallback (maximum 5 years)
+echo "Generating backup SAS token..."
+STORAGE_KEY=$(az storage account keys list \
+    --account-name "$STORAGE_ACCOUNT_NAME" \
+    --resource-group "$BILLING_RG" \
+    --query "[0].value" \
+    --output tsv 2>/dev/null)
+
+if [ -n "$STORAGE_KEY" ]; then
+    # Set expiry to 5 years (maximum allowed)
+    SAS_EXPIRY=$(date -u -d '5 years' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -v +1825d '+%Y-%m-%dT%H:%MZ')
+    SAS_TOKEN=$(az storage container generate-sas \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --name "$CONTAINER_NAME" \
+        --permissions rl \
+        --expiry "$SAS_EXPIRY" \
+        --account-key "$STORAGE_KEY" \
+        --output tsv 2>/dev/null)
+    echo "✅ Backup SAS token generated (valid for 5 years)"
+else
+    SAS_TOKEN=""
+fi
+
 # Create linked service for billing storage
 echo "🔗 Creating linked service to billing storage..."
 LINKED_SERVICE_NAME="BillingStorageLinkedService"
@@ -405,59 +459,7 @@ SQL_QUERY="SELECT TOP 10 * FROM OPENROWSET(
     PARSER_VERSION = '2.0'
 ) AS BillingData"
 
-# Configure authentication method
-echo ""
-echo "🔑 Configuring authentication for Synapse access..."
-
-# Option 1: Use Managed Identity (no expiration)
-AUTH_METHOD="ManagedIdentity"
-
-# Grant the service principal access to the storage account
-echo "Setting up Managed Identity access..."
-az role assignment create \
-    --role "Storage Blob Data Reader" \
-    --assignee "$SP_OBJECT_ID" \
-    --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
-    --only-show-errors
-
-# Also grant Synapse workspace managed identity access
-SYNAPSE_IDENTITY=$(az synapse workspace show \
-    --name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$SYNAPSE_RG" \
-    --query "identity.principalId" \
-    --output tsv)
-
-if [ -n "$SYNAPSE_IDENTITY" ]; then
-    az role assignment create \
-        --role "Storage Blob Data Reader" \
-        --assignee "$SYNAPSE_IDENTITY" \
-        --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
-        --only-show-errors
-    echo "✅ Managed Identity configured (never expires)"
-fi
-
-# Option 2: Generate long-term SAS token as fallback (maximum 5 years)
-# Note: Using Managed Identity is preferred, but keeping SAS as backup
-STORAGE_KEY=$(az storage account keys list \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --resource-group "$BILLING_RG" \
-    --query "[0].value" \
-    --output tsv)
-
-if [ -n "$STORAGE_KEY" ]; then
-    # Set expiry to 5 years (maximum allowed)
-    SAS_EXPIRY=$(date -u -d '5 years' '+%Y-%m-%dT%H:%MZ' 2>/dev/null || date -v +1825d '+%Y-%m-%dT%H:%MZ')
-    SAS_TOKEN=$(az storage container generate-sas \
-        --account-name "$STORAGE_ACCOUNT_NAME" \
-        --name "$CONTAINER_NAME" \
-        --permissions rl \
-        --expiry "$SAS_EXPIRY" \
-        --account-key "$STORAGE_KEY" \
-        --output tsv)
-    echo "✅ Backup SAS token generated (valid for 5 years)"
-else
-    SAS_TOKEN=""
-fi
+# Note: Authentication will be configured after resources are created
 
 # Automated Synapse Database Setup
 echo ""
@@ -465,21 +467,6 @@ echo "🔧 Setting up Synapse database and views automatically..."
 
 # Generate a secure password for master key
 MASTER_KEY_PASSWORD="StrongP@ssw0rd$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)!"
-
-# Execute SQL commands in Synapse using Azure CLI
-echo "Creating BillingAnalytics database..."
-
-# Create database
-az synapse sql script create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --name "CreateBillingDatabase" \
-    --file-path /dev/stdin \
-    --only-show-errors <<EOF
-CREATE DATABASE IF NOT EXISTS BillingAnalytics
-EOF
-
-# Wait for database creation
-sleep 5
 
 # Create and execute the setup script
 echo "Setting up database objects..."
@@ -667,8 +654,8 @@ if command -v python3 >/dev/null 2>&1; then
     if ! python3 -c "import pyodbc" 2>/dev/null; then
         echo "📦 Installing pyodbc for automated setup..."
         # Try to install pyodbc and dependencies
-        if command -v apt-get >/dev/null 2>&1; then
-            # Debian/Ubuntu
+        if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+            # Debian/Ubuntu with sudo
             sudo apt-get update >/dev/null 2>&1
             sudo apt-get install -y unixodbc-dev >/dev/null 2>&1
             
@@ -679,13 +666,25 @@ if command -v python3 >/dev/null 2>&1; then
                 sudo apt-get update >/dev/null 2>&1
                 sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 >/dev/null 2>&1
             fi
+        elif command -v apt-get >/dev/null 2>&1; then
+            # Debian/Ubuntu without sudo (running as root)
+            apt-get update >/dev/null 2>&1
+            apt-get install -y unixodbc-dev >/dev/null 2>&1
         elif command -v yum >/dev/null 2>&1; then
             # RHEL/CentOS
-            sudo yum install -y unixODBC-devel >/dev/null 2>&1
+            if command -v sudo >/dev/null 2>&1; then
+                sudo yum install -y unixODBC-devel >/dev/null 2>&1
+            else
+                yum install -y unixODBC-devel >/dev/null 2>&1
+            fi
         fi
         
-        # Install pyodbc
-        pip3 install pyodbc --quiet 2>/dev/null || pip install pyodbc --quiet 2>/dev/null || sudo pip3 install pyodbc --quiet 2>/dev/null
+        # Install pyodbc - try different methods
+        pip3 install pyodbc --quiet 2>/dev/null || \
+        pip install pyodbc --quiet 2>/dev/null || \
+        python3 -m pip install pyodbc --quiet 2>/dev/null || \
+        (command -v sudo >/dev/null 2>&1 && sudo pip3 install pyodbc --quiet 2>/dev/null) || \
+        echo "⚠️  Could not install pyodbc automatically"
     fi
     
     # Try to run the automated setup
