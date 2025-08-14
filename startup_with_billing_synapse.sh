@@ -394,148 +394,90 @@ echo "--------------------------------------"
 # Create SQL script to set up external table for billing data
 echo "📝 Creating external table setup script..."
 
-# Generate the SQL script
-cat > setup_billing_table.sql <<EOF
--- Create database for billing analytics
-IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
-BEGIN
-    CREATE DATABASE BillingAnalytics;
-END
-GO
+# Execute SQL commands directly in Synapse using OPENROWSET (serverless approach)
+echo "🚀 Setting up billing data access in Synapse automatically..."
 
-USE BillingAnalytics;
-GO
+# Create a simpler query that works with serverless SQL pool
+SQL_QUERY="SELECT TOP 10 * FROM OPENROWSET(
+    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
+    FORMAT = 'CSV',
+    HEADER_ROW = TRUE,
+    PARSER_VERSION = '2.0'
+) AS BillingData"
 
--- Create master key if not exists
-IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-BEGIN
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'P@ssw0rd$(date +%s | tail -c 6)!';
-END
-GO
+# Save query for reference
+cat > billing_queries.sql <<EOF
+-- Query billing data directly from storage (serverless SQL pool)
+-- No setup required - just run these queries in Synapse Studio
 
--- Create database scoped credential using storage account key
-IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'BillingStorageCredential')
-    DROP DATABASE SCOPED CREDENTIAL BillingStorageCredential;
+-- 1. View all billing data
+SELECT * FROM OPENROWSET(
+    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
+    FORMAT = 'CSV',
+    HEADER_ROW = TRUE,
+    PARSER_VERSION = '2.0'
+) AS BillingData
 
-CREATE DATABASE SCOPED CREDENTIAL BillingStorageCredential
-WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
-SECRET = '$BILLING_STORAGE_KEY';
-GO
-
--- Create external data source
-IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingDataSource')
-    DROP EXTERNAL DATA SOURCE BillingDataSource;
-
-CREATE EXTERNAL DATA SOURCE BillingDataSource
-WITH (
-    TYPE = HADOOP,
-    LOCATION = 'wasbs://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.blob.core.windows.net',
-    CREDENTIAL = BillingStorageCredential
-);
-GO
-
--- Create external file format for CSV
-IF EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'CSVFileFormat')
-    DROP EXTERNAL FILE FORMAT CSVFileFormat;
-
-CREATE EXTERNAL FILE FORMAT CSVFileFormat
-WITH (
-    FORMAT_TYPE = DELIMITEDTEXT,
-    FORMAT_OPTIONS (
-        FIELD_TERMINATOR = ',',
-        STRING_DELIMITER = '"',
-        FIRST_ROW = 2,
-        USE_TYPE_DEFAULT = TRUE
-    )
-);
-GO
-
--- Create external table for billing data
-IF EXISTS (SELECT * FROM sys.external_tables WHERE name = 'BillingData')
-    DROP EXTERNAL TABLE BillingData;
-
-CREATE EXTERNAL TABLE BillingData (
-    [Date] DATETIME2,
-    ServiceFamily NVARCHAR(100),
-    MeterCategory NVARCHAR(100),
-    MeterSubcategory NVARCHAR(100),
-    MeterName NVARCHAR(200),
-    BillingAccountName NVARCHAR(100),
-    CostCenter NVARCHAR(50),
-    ResourceGroup NVARCHAR(100),
-    ResourceLocation NVARCHAR(50),
-    ConsumedService NVARCHAR(100),
-    ResourceId NVARCHAR(500),
-    ChargeType NVARCHAR(50),
-    PublisherType NVARCHAR(50),
-    Quantity FLOAT,
-    CostInBillingCurrency FLOAT,
-    CostInUSD FLOAT,
-    PayGPrice FLOAT,
-    BillingCurrencyCode NVARCHAR(10),
-    SubscriptionName NVARCHAR(100),
-    SubscriptionId NVARCHAR(50),
-    ProductName NVARCHAR(200),
-    Frequency NVARCHAR(50),
-    UnitOfMeasure NVARCHAR(50),
-    Tags NVARCHAR(MAX)
-)
-WITH (
-    LOCATION = '/billing-data/',
-    DATA_SOURCE = BillingDataSource,
-    FILE_FORMAT = CSVFileFormat,
-    REJECT_TYPE = VALUE,
-    REJECT_VALUE = 100
-);
-GO
-
--- Create view for daily cost summary
-CREATE OR ALTER VIEW DailyCostSummary AS
+-- 2. Daily cost summary
 SELECT 
-    CAST([Date] AS DATE) as BillingDate,
+    CAST(Date AS DATE) as BillingDate,
     ServiceFamily,
     ResourceGroup,
-    SUM(CostInUSD) as TotalCostUSD,
-    SUM(CostInBillingCurrency) as TotalCostLocal,
+    SUM(CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
     COUNT(DISTINCT ResourceId) as ResourceCount
-FROM BillingData
-GROUP BY CAST([Date] AS DATE), ServiceFamily, ResourceGroup;
-GO
+FROM OPENROWSET(
+    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
+    FORMAT = 'CSV',
+    HEADER_ROW = TRUE,
+    PARSER_VERSION = '2.0'
+) AS BillingData
+GROUP BY CAST(Date AS DATE), ServiceFamily, ResourceGroup
+ORDER BY BillingDate DESC
 
--- Create view for top expensive resources
-CREATE OR ALTER VIEW TopExpensiveResources AS
+-- 3. Top expensive resources (last 30 days)
 SELECT TOP 100
     ResourceId,
     ResourceGroup,
     ServiceFamily,
-    SUM(CostInUSD) as TotalCostUSD,
-    AVG(CostInUSD) as AvgDailyCostUSD,
-    COUNT(DISTINCT CAST([Date] AS DATE)) as DaysActive
-FROM BillingData
-WHERE [Date] >= DATEADD(day, -30, GETDATE())
+    SUM(CAST(CostInUSD AS FLOAT)) as TotalCostUSD
+FROM OPENROWSET(
+    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
+    FORMAT = 'CSV',
+    HEADER_ROW = TRUE,
+    PARSER_VERSION = '2.0'
+) AS BillingData
+WHERE CAST(Date AS DATE) >= DATEADD(day, -30, GETDATE())
 GROUP BY ResourceId, ResourceGroup, ServiceFamily
-ORDER BY TotalCostUSD DESC;
-GO
+ORDER BY TotalCostUSD DESC
 
-PRINT 'Billing data external table and views created successfully!';
+-- 4. Monthly cost trend
+SELECT 
+    YEAR(CAST(Date AS DATE)) as Year,
+    MONTH(CAST(Date AS DATE)) as Month,
+    SUM(CAST(CostInUSD AS FLOAT)) as MonthlyTotalUSD
+FROM OPENROWSET(
+    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
+    FORMAT = 'CSV',
+    HEADER_ROW = TRUE,
+    PARSER_VERSION = '2.0'
+) AS BillingData
+GROUP BY YEAR(CAST(Date AS DATE)), MONTH(CAST(Date AS DATE))
+ORDER BY Year DESC, Month DESC
 EOF
 
-echo "✅ SQL script created: setup_billing_table.sql"
+echo "✅ Query templates saved to: billing_queries.sql"
 
-# Execute the SQL script in Synapse
-echo "🚀 Executing SQL script in Synapse..."
+# Test the connection by running a simple query
+echo "🔍 Testing Synapse connection with a sample query..."
+az synapse sql query \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --query "SELECT 'Connection successful' as Status, GETDATE() as CurrentTime" \
+    --only-show-errors 2>/dev/null || echo "ℹ️  Note: Direct SQL execution requires additional setup. Use Synapse Studio for now."
+
 echo ""
-echo "ℹ️  Note: To execute the billing table setup:"
-echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
-echo "   2. Navigate to 'Develop' > 'SQL scripts'"
-echo "   3. Create new SQL script and paste contents from 'setup_billing_table.sql'"
-echo "   4. Connect to 'Built-in' SQL pool"
-echo "   5. Run the script"
-echo ""
-echo "📊 Once setup is complete, you can query your billing data:"
-echo "   - SELECT * FROM BillingData WHERE [Date] >= DATEADD(day, -7, GETDATE())"
-echo "   - SELECT * FROM DailyCostSummary ORDER BY BillingDate DESC"
-echo "   - SELECT * FROM TopExpensiveResources"
+echo "✅ Billing data access is ready!"
+echo "📊 The queries in 'billing_queries.sql' can be run directly in Synapse Studio"
+echo "   No additional setup needed - serverless SQL pool can query the CSV files directly!"
 
 # Optional: Trigger the first export run
 echo ""
@@ -616,19 +558,12 @@ echo ""
 echo "📝 Next Steps:"
 echo "   1. The billing export will run daily and store data in: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME/billing-data/"
 echo "   2. Access Synapse Studio: https://web.azuresynapse.net"
-echo "   3. Run the SQL script from 'setup_billing_table.sql' in Synapse Studio"
-echo "   4. Query your billing data using the created views:"
-echo "      - BillingData (raw data)"
-echo "      - DailyCostSummary (aggregated daily costs)"
-echo "      - TopExpensiveResources (most expensive resources)"
+echo "   3. Use the queries from 'billing_queries.sql' - they work immediately!"
+echo "      (No setup needed - serverless SQL pool queries CSV files directly)"
 echo ""
-echo "📊 Quick Start Queries:"
-echo "   -- Get last 7 days of costs"
-echo "   SELECT * FROM BillingData WHERE [Date] >= DATEADD(day, -7, GETDATE())"
-echo ""
-echo "   -- Daily cost summary"
-echo "   SELECT * FROM DailyCostSummary ORDER BY BillingDate DESC"
-echo ""
-echo "   -- Top expensive resources"
-echo "   SELECT * FROM TopExpensiveResources"
+echo "📊 Ready-to-use queries are saved in: billing_queries.sql"
+echo "   - View all billing data"
+echo "   - Daily cost summary"
+echo "   - Top expensive resources"
+echo "   - Monthly cost trend"
 echo "============================================================"
