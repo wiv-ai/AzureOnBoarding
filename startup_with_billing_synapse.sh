@@ -104,9 +104,29 @@ echo "--------------------------------------"
 read -p "🔹 Enter Resource Group name for billing resources (or press Enter for 'rg-billing-export'): " BILLING_RG
 BILLING_RG=${BILLING_RG:-"rg-billing-export"}
 
+# Prompt for Azure region
+echo "🌍 Select Azure region for resources:"
+echo "   1. East US 2 (eastus2)"
+echo "   2. West US 2 (westus2)"
+echo "   3. Central US (centralus)"
+echo "   4. North Europe (northeurope)"
+echo "   5. West Europe (westeurope)"
+read -p "Enter your choice (1-5) or press Enter for default (eastus2): " REGION_CHOICE
+
+case $REGION_CHOICE in
+    1|"") AZURE_REGION="eastus2" ;;
+    2) AZURE_REGION="westus2" ;;
+    3) AZURE_REGION="centralus" ;;
+    4) AZURE_REGION="northeurope" ;;
+    5) AZURE_REGION="westeurope" ;;
+    *) AZURE_REGION="eastus2" ;;
+esac
+
+echo "📍 Using region: $AZURE_REGION"
+
 # Create resource group if it doesn't exist
 echo "📁 Creating/Checking resource group '$BILLING_RG'..."
-az group create --name "$BILLING_RG" --location "eastus" --only-show-errors
+az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
 
 # Create storage account for billing exports
 STORAGE_ACCOUNT_NAME="billingstorage$(date +%s | tail -c 6)"
@@ -114,7 +134,7 @@ echo "📦 Creating storage account '$STORAGE_ACCOUNT_NAME'..."
 az storage account create \
     --name "$STORAGE_ACCOUNT_NAME" \
     --resource-group "$BILLING_RG" \
-    --location "eastus" \
+    --location "$AZURE_REGION" \
     --sku Standard_LRS \
     --kind StorageV2 \
     --only-show-errors
@@ -226,7 +246,7 @@ echo "📦 Creating Data Lake Storage Gen2 account '$SYNAPSE_STORAGE'..."
 az storage account create \
     --name "$SYNAPSE_STORAGE" \
     --resource-group "$BILLING_RG" \
-    --location "eastus" \
+    --location "$AZURE_REGION" \
     --sku Standard_LRS \
     --kind StorageV2 \
     --hierarchical-namespace true \
@@ -253,12 +273,12 @@ az synapse workspace create \
     --file-system "$FILESYSTEM_NAME" \
     --sql-admin-login-user "$SQL_ADMIN_USER" \
     --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
-    --location "eastus" \
+    --location "$AZURE_REGION" \
     --only-show-errors
 
 # Wait for workspace to be created
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
-az synapse workspace wait --resource-group "$BILLING_RG" --name "$SYNAPSE_WORKSPACE" --created
+az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
 # Create firewall rule to allow Azure services
 echo "🔥 Configuring firewall rules..."
