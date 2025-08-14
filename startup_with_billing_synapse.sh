@@ -272,7 +272,7 @@ az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNA
 # Create firewall rule to allow Azure services
 echo "🔥 Configuring firewall rules..."
 az synapse workspace firewall-rule create \
-    --name "AllowAllAzureServices" \
+    --name "AllowAllWindowsAzureIps" \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --resource-group "$BILLING_RG" \
     --start-ip-address "0.0.0.0" \
