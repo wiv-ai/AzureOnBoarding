@@ -735,8 +735,14 @@ if command -v python3 >/dev/null 2>&1; then
             
             # Install Microsoft ODBC Driver
             if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" >/dev/null 2>&1; then
-                curl https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg 2>/dev/null
-                curl -s https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs 2>/dev/null || echo "22.04")/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+                # Try to get Ubuntu version, default to 22.04 if not available
+                UBUNTU_VERSION="22.04"
+                if command -v lsb_release >/dev/null 2>&1; then
+                    UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "22.04")
+                fi
+                
+                curl https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg 2>/dev/null
+                curl -s https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/prod.list 2>/dev/null | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
                 sudo apt-get update >/dev/null 2>&1
                 sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 >/dev/null 2>&1
             fi
