@@ -173,26 +173,29 @@ az rest --method PUT \
         "configuration": {
           "columns": [
             "Date",
-            "ServiceName",
-            "ServiceTier",
+            "ServiceFamily",
             "MeterCategory",
-            "MeterSubCategory",
-            "Meter",
-            "AccountName",
-            "DepartmentName",
+            "MeterSubcategory",
+            "MeterName",
+            "BillingAccountName",
             "CostCenter",
             "ResourceGroup",
             "ResourceLocation",
             "ConsumedService",
             "ResourceId",
-            "ResourceType",
             "ChargeType",
             "PublisherType",
             "Quantity",
-            "Cost",
-            "CostUSD",
+            "CostInBillingCurrency",
+            "CostInUSD",
             "PayGPrice",
-            "BillingCurrency"
+            "BillingCurrencyCode",
+            "SubscriptionName",
+            "SubscriptionId",
+            "ProductName",
+            "Frequency",
+            "UnitOfMeasure",
+            "Tags"
           ]
         }
       }
