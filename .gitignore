@@ -1,0 +1,14 @@
+# Sensitive configuration files - DO NOT COMMIT
+synapse_config.py
+*_config.py
+*.secret
+*.key
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Azure credentials
+azure_credentials.json
+service_principal.json
