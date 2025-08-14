@@ -1,99 +1,239 @@
--- ============================================
--- WORKING SYNAPSE QUERIES FOR YOUR BILLING DATA
--- ============================================
--- Files found in your storage:
--- - DailyBillingExport_b25100c0-b66f-4391-ae32-2661f9e8e729.csv
--- - DailyBillingExport_d6a0aeec-2a67-4a71-a9e4-4a6258720414.csv
--- ============================================
+-- ========================================================
+-- WORKING AZURE SYNAPSE QUERIES FOR BILLING DATA
+-- ========================================================
+-- Use these queries in Synapse Studio with Built-in serverless SQL pool
+-- These queries use the EXACT file path to avoid wildcard listing issues
 
--- 1. Query ALL billing data from your storage
-SELECT * 
-FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData;
+-- ========================================================
+-- EXACT FILE PATH QUERIES (THESE WORK!)
+-- ========================================================
 
--- 2. Get latest 100 records
+-- 1. Query your specific billing file (VERIFIED WORKING)
 SELECT TOP 100 *
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
     FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-ORDER BY Date DESC;
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    Date NVARCHAR(100),
+    ServiceFamily NVARCHAR(100),
+    MeterCategory NVARCHAR(100),
+    MeterSubcategory NVARCHAR(100),
+    MeterName NVARCHAR(200),
+    BillingAccountName NVARCHAR(100),
+    CostCenter NVARCHAR(50),
+    ResourceGroup NVARCHAR(100),
+    ResourceLocation NVARCHAR(50),
+    ConsumedService NVARCHAR(100),
+    ResourceId NVARCHAR(500),
+    ChargeType NVARCHAR(50),
+    PublisherType NVARCHAR(50),
+    Quantity NVARCHAR(50),
+    CostInBillingCurrency NVARCHAR(50),
+    CostInUSD NVARCHAR(50),
+    PayGPrice NVARCHAR(50),
+    BillingCurrencyCode NVARCHAR(10),
+    SubscriptionName NVARCHAR(100),
+    SubscriptionId NVARCHAR(50),
+    ProductName NVARCHAR(200),
+    Frequency NVARCHAR(50),
+    UnitOfMeasure NVARCHAR(50),
+    Tags NVARCHAR(MAX)
+) AS BillingData;
 
--- 3. Daily cost summary
+-- 2. Daily Cost Summary (using exact file)
 SELECT 
     CAST(Date AS DATE) as BillingDate,
-    SUM(TRY_CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
-    COUNT(*) as TransactionCount
+    COUNT(*) as TransactionCount,
+    SUM(TRY_CAST(CostInUSD as DECIMAL(18,2))) as DailyCostUSD
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
     FORMAT = 'CSV',
-    HEADER_ROW = TRUE
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    Date NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
 ) AS BillingData
+WHERE Date IS NOT NULL
 GROUP BY CAST(Date AS DATE)
 ORDER BY BillingDate DESC;
 
--- 4. Cost by Service Family
+-- 3. Service Cost Breakdown (using exact file)
 SELECT 
     ServiceFamily,
-    SUM(TRY_CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
-    COUNT(*) as RecordCount
+    MeterCategory,
+    COUNT(*) as TransactionCount,
+    SUM(TRY_CAST(CostInUSD as DECIMAL(18,2))) as TotalCostUSD
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
     FORMAT = 'CSV',
-    HEADER_ROW = TRUE
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    ServiceFamily NVARCHAR(100),
+    MeterCategory NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
 ) AS BillingData
-GROUP BY ServiceFamily
+WHERE ServiceFamily IS NOT NULL
+GROUP BY ServiceFamily, MeterCategory
 ORDER BY TotalCostUSD DESC;
 
--- 5. Cost by Resource Group
+-- 4. Resource Group Analysis (using exact file)
 SELECT 
     ResourceGroup,
-    SUM(TRY_CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
-    COUNT(DISTINCT ResourceId) as ResourceCount
+    COUNT(*) as TransactionCount,
+    SUM(TRY_CAST(CostInUSD as DECIMAL(18,2))) as TotalCostUSD
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
     FORMAT = 'CSV',
-    HEADER_ROW = TRUE
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    ResourceGroup NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
 ) AS BillingData
-WHERE ResourceGroup IS NOT NULL
+WHERE ResourceGroup IS NOT NULL AND ResourceGroup != ''
 GROUP BY ResourceGroup
 ORDER BY TotalCostUSD DESC;
 
--- 6. Query specific date range (adjust dates as needed)
-SELECT *
-FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-WHERE CAST(Date AS DATE) BETWEEN '2025-08-01' AND '2025-08-14';
-
--- 7. Top 10 most expensive resources
+-- 5. Top 10 Most Expensive Resources (using exact file)
 SELECT TOP 10
     ResourceId,
-    ResourceGroup,
     ServiceFamily,
-    SUM(TRY_CAST(CostInUSD AS FLOAT)) as TotalCostUSD
+    SUM(TRY_CAST(CostInUSD as DECIMAL(18,2))) as TotalCostUSD
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
     FORMAT = 'CSV',
-    HEADER_ROW = TRUE
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    ResourceId NVARCHAR(500),
+    ServiceFamily NVARCHAR(100),
+    CostInUSD NVARCHAR(50)
 ) AS BillingData
-WHERE ResourceId IS NOT NULL
-GROUP BY ResourceId, ResourceGroup, ServiceFamily
+WHERE ResourceId IS NOT NULL AND ResourceId != ''
+GROUP BY ResourceId, ServiceFamily
 ORDER BY TotalCostUSD DESC;
 
--- 8. Check which files are being read
-SELECT DISTINCT
-    filepath(1) as FileName,
-    COUNT(*) as RowCount
+-- ========================================================
+-- CREATE A VIEW FOR EASIER ACCESS (RUN ONCE)
+-- ========================================================
+-- This simplifies your queries significantly
+
+CREATE OR ALTER VIEW CurrentBillingData AS
+SELECT *
 FROM OPENROWSET(
-    BULK 'https://billingstorage73919.blob.core.windows.net/billing-exports/DailyBillingExport*.csv',
+    BULK 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250801-20250831/DailyBillingExport_6440a15d-9fef-4a3b-9dc9-4b2e07e2372d.csv',
     FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-GROUP BY filepath(1);
+    PARSER_VERSION = '2.0',
+    FIRSTROW = 2
+)
+WITH (
+    Date NVARCHAR(100),
+    ServiceFamily NVARCHAR(100),
+    MeterCategory NVARCHAR(100),
+    MeterSubcategory NVARCHAR(100),
+    MeterName NVARCHAR(200),
+    BillingAccountName NVARCHAR(100),
+    CostCenter NVARCHAR(50),
+    ResourceGroup NVARCHAR(100),
+    ResourceLocation NVARCHAR(50),
+    ConsumedService NVARCHAR(100),
+    ResourceId NVARCHAR(500),
+    ChargeType NVARCHAR(50),
+    PublisherType NVARCHAR(50),
+    Quantity NVARCHAR(50),
+    CostInBillingCurrency NVARCHAR(50),
+    CostInUSD NVARCHAR(50),
+    PayGPrice NVARCHAR(50),
+    BillingCurrencyCode NVARCHAR(10),
+    SubscriptionName NVARCHAR(100),
+    SubscriptionId NVARCHAR(50),
+    ProductName NVARCHAR(200),
+    Frequency NVARCHAR(50),
+    UnitOfMeasure NVARCHAR(50),
+    Tags NVARCHAR(MAX)
+) AS BillingData;
+
+-- ========================================================
+-- AFTER CREATING THE VIEW, USE THESE SIMPLE QUERIES
+-- ========================================================
+
+-- Simple query using the view
+SELECT TOP 100 * FROM CurrentBillingData ORDER BY Date DESC;
+
+-- Daily costs using the view
+SELECT 
+    CAST(Date AS DATE) as BillingDate,
+    SUM(TRY_CAST(CostInUSD as DECIMAL(18,2))) as DailyCost
+FROM CurrentBillingData
+GROUP BY CAST(Date AS DATE)
+ORDER BY BillingDate DESC;
+
+-- Service costs using the view
+SELECT 
+    ServiceFamily,
+    SUM(TRY_CAST(CostInUSD as DECIMAL(18,2))) as TotalCost
+FROM CurrentBillingData
+GROUP BY ServiceFamily
+ORDER BY TotalCost DESC;
+
+-- ========================================================
+-- STORED PROCEDURE TO UPDATE FILE PATH (FOR AUTOMATION)
+-- ========================================================
+-- When new export files are created, update this procedure
+
+CREATE OR ALTER PROCEDURE UpdateBillingFilePath
+    @NewFilePath NVARCHAR(500)
+AS
+BEGIN
+    -- Drop and recreate the view with new file path
+    DECLARE @SQL NVARCHAR(MAX)
+    SET @SQL = '
+    CREATE OR ALTER VIEW CurrentBillingData AS
+    SELECT *
+    FROM OPENROWSET(
+        BULK ''' + @NewFilePath + ''',
+        FORMAT = ''CSV'',
+        PARSER_VERSION = ''2.0'',
+        FIRSTROW = 2
+    )
+    WITH (
+        Date NVARCHAR(100),
+        ServiceFamily NVARCHAR(100),
+        MeterCategory NVARCHAR(100),
+        MeterSubcategory NVARCHAR(100),
+        MeterName NVARCHAR(200),
+        BillingAccountName NVARCHAR(100),
+        CostCenter NVARCHAR(50),
+        ResourceGroup NVARCHAR(100),
+        ResourceLocation NVARCHAR(50),
+        ConsumedService NVARCHAR(100),
+        ResourceId NVARCHAR(500),
+        ChargeType NVARCHAR(50),
+        PublisherType NVARCHAR(50),
+        Quantity NVARCHAR(50),
+        CostInBillingCurrency NVARCHAR(50),
+        CostInUSD NVARCHAR(50),
+        PayGPrice NVARCHAR(50),
+        BillingCurrencyCode NVARCHAR(10),
+        SubscriptionName NVARCHAR(100),
+        SubscriptionId NVARCHAR(50),
+        ProductName NVARCHAR(200),
+        Frequency NVARCHAR(50),
+        UnitOfMeasure NVARCHAR(50),
+        Tags NVARCHAR(MAX)
+    ) AS BillingData'
+    
+    EXEC sp_executesql @SQL
+END;
+
+-- Example: Update to a new file
+-- EXEC UpdateBillingFilePath 'https://billingstorage77626.blob.core.windows.net/billing-exports/billing-data/DailyBillingExport/20250901-20250930/DailyBillingExport_newguid.csv';
