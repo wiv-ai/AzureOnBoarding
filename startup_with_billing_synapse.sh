@@ -508,8 +508,8 @@ echo ""
 echo "🔧 Setting up Synapse database and views automatically..."
 echo "Setting up database objects..."
 
-# Use specific master key password
-MASTER_KEY_PASSWORD='13_3TVOR3brY)8C#vE`k'
+# Generate a secure password for master key
+MASTER_KEY_PASSWORD="StrongP@ssw0rd$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)!"
 
 # Generate Python script for automated setup
 cat > setup_synapse_automated.py <<'PYTHON_EOF'
@@ -872,7 +872,7 @@ GO
 USE BillingAnalytics;
 GO
 
-CREATE MASTER KEY ENCRYPTION BY PASSWORD = '13_3TVOR3brY)8C#vE\`k';
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
 GO
 
 -- Using Managed Identity with abfss:// protocol (NEVER EXPIRES!)
