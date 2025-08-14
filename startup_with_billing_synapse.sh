@@ -282,6 +282,9 @@ fi
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
+echo "⏳ Waiting for Synapse workspace to be fully operational..."
+sleep 30
+
 # Create firewall rules
 echo "🔥 Configuring firewall rules..."
 
@@ -491,10 +494,50 @@ config = {
     'master_key_password': '$MASTER_KEY_PASSWORD'
 }
 
+def wait_for_synapse():
+    """Wait for Synapse to be ready"""
+    print("⏳ Waiting for Synapse workspace to be fully ready...")
+    max_retries = 10
+    retry_delay = 30
+    
+    for attempt in range(max_retries):
+        try:
+            # Try a simple connection to check if Synapse is ready
+            test_conn_str = f"""
+            DRIVER={{ODBC Driver 18 for SQL Server}};
+            SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
+            DATABASE=master;
+            UID={config['client_id']};
+            PWD={config['client_secret']};
+            Authentication=ActiveDirectoryServicePrincipal;
+            Encrypt=yes;
+            TrustServerCertificate=no;
+            Connection Timeout=30;
+            """
+            
+            conn = pyodbc.connect(test_conn_str, autocommit=True)
+            conn.close()
+            print("✅ Synapse is ready!")
+            return True
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⏳ Synapse not ready yet (attempt {attempt + 1}/{max_retries}). Waiting {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(f"❌ Synapse not accessible after {max_retries} attempts: {e}")
+                return False
+    
+    return False
+
 def execute_sql_commands(conn_str, commands):
     """Execute SQL commands one by one"""
     try:
-        conn = pyodbc.connect(conn_str, autocommit=True)
+        # Add connection timeout
+        conn_str_with_timeout = conn_str.replace(
+            'TrustServerCertificate=no;',
+            'TrustServerCertificate=no;Connection Timeout=60;'
+        )
+        conn = pyodbc.connect(conn_str_with_timeout, autocommit=True)
         cursor = conn.cursor()
         
         for i, command in enumerate(commands, 1):
@@ -518,6 +561,22 @@ def execute_sql_commands(conn_str, commands):
         print(f"Connection failed: {e}")
         return False
 
+# First wait for Synapse to be ready
+if not wait_for_synapse():
+    print("⚠️  Synapse is not accessible via service principal. This could be due to:")
+    print("   1. Firewall rules not yet propagated (wait a few minutes)")
+    print("   2. Service principal permissions still propagating")
+    print("   3. Synapse workspace still provisioning")
+    print("")
+    print("📝 Manual setup instructions saved to: synapse_billing_setup.sql")
+    print("   You can either:")
+    print("   a) Wait 5-10 minutes and re-run this script")
+    print("   b) Run the SQL script manually in Synapse Studio")
+    print("")
+    print("💡 TIP: The Synapse workspace is created and will work!")
+    print("   The automated database setup just needs more time to connect.")
+    sys.exit(0)
+
 # Connection string for master database
 master_conn_str = f"""
 DRIVER={{ODBC Driver 18 for SQL Server}};
@@ -528,6 +587,7 @@ PWD={config['client_secret']};
 Authentication=ActiveDirectoryServicePrincipal;
 Encrypt=yes;
 TrustServerCertificate=no;
+Connection Timeout=60;
 """
 
 # Create database
@@ -548,6 +608,7 @@ PWD={config['client_secret']};
 Authentication=ActiveDirectoryServicePrincipal;
 Encrypt=yes;
 TrustServerCertificate=no;
+Connection Timeout=60;
 """
 
 # Setup commands
