@@ -347,83 +347,27 @@ az synapse linked-service create \
 # Clean up temp file
 rm linked_service.json
 
-# Create SQL script for analyzing billing data
-echo "📝 Creating SQL script for billing analysis..."
-SQL_SCRIPT_NAME="AnalyzeBillingData"
-
-cat > billing_analysis.sql <<'EOF'
--- Create external data source for billing exports
-IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage')
-BEGIN
-    CREATE EXTERNAL DATA SOURCE BillingStorage
-    WITH (
-        TYPE = HADOOP,
-        LOCATION = 'wasbs://billing-exports@STORAGE_ACCOUNT_NAME.blob.core.windows.net'
-    );
-END;
-
--- Create external file format for CSV
-IF NOT EXISTS (SELECT * FROM sys.external_file_formats WHERE name = 'CSVFormat')
-BEGIN
-    CREATE EXTERNAL FILE FORMAT CSVFormat
-    WITH (
-        FORMAT_TYPE = DELIMITEDTEXT,
-        FORMAT_OPTIONS (
-            FIELD_TERMINATOR = ',',
-            STRING_DELIMITER = '"',
-            FIRST_ROW = 2,
-            USE_TYPE_DEFAULT = TRUE
-        )
-    );
-END;
-
--- Query to analyze daily costs
-SELECT 
-    Date,
-    ServiceName,
-    ResourceGroup,
-    SUM(CAST(Cost AS FLOAT)) AS TotalCost,
-    SUM(CAST(CostUSD AS FLOAT)) AS TotalCostUSD
-FROM 
-    OPENROWSET(
-        BULK 'billing-data/*.csv',
-        DATA_SOURCE = 'BillingStorage',
-        FORMAT = 'CSV',
-        PARSER_VERSION = '2.0',
-        HEADER_ROW = TRUE
-    ) AS [billing]
-GROUP BY 
-    Date, ServiceName, ResourceGroup
-ORDER BY 
-    Date DESC, TotalCostUSD DESC;
-
--- Query to get top 10 most expensive resources
-SELECT TOP 10
-    ResourceId,
-    ResourceType,
-    ServiceName,
-    SUM(CAST(CostUSD AS FLOAT)) AS TotalCostUSD
-FROM 
-    OPENROWSET(
-        BULK 'billing-data/*.csv',
-        DATA_SOURCE = 'BillingStorage',
-        FORMAT = 'CSV',
-        PARSER_VERSION = '2.0',
-        HEADER_ROW = TRUE
-    ) AS [billing]
-WHERE 
-    Date >= DATEADD(day, -30, GETDATE())
-GROUP BY 
-    ResourceId, ResourceType, ServiceName
-ORDER BY 
-    TotalCostUSD DESC;
-EOF
-
-# Replace placeholder with actual storage account name
-sed -i "s/STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" billing_analysis.sql
-
-# Upload SQL script to Synapse (Note: This requires Synapse Studio or REST API)
-echo "📤 SQL script created locally. Upload to Synapse Studio for execution."
+# ===========================
+# SYNAPSE QUERY EXAMPLES
+# ===========================
+echo ""
+echo "📊 Example: How to query Synapse using Azure CLI..."
+echo "--------------------------------------"
+echo ""
+echo "You can query your billing data in Synapse using Azure CLI:"
+echo ""
+echo "# Example 1: Query daily costs"
+echo "az synapse sql pool query \\"
+echo "  --workspace-name $SYNAPSE_WORKSPACE \\"
+echo "  --name built-in \\"
+echo "  --query-text \"SELECT TOP 10 * FROM OPENROWSET(BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv', FORMAT = 'CSV', HEADER_ROW = TRUE) AS billing\""
+echo ""
+echo "# Example 2: Using REST API to query"
+echo "az rest --method POST \\"
+echo "  --uri \"https://$SYNAPSE_WORKSPACE.sql.azuresynapse.net/sql/pools/built-in/query\" \\"
+echo "  --headers \"Content-Type=application/json\" \\"
+echo "  --body '{\"query\": \"SELECT COUNT(*) FROM OPENROWSET(...)\"}'"
+echo ""
 
 # Optional: Microsoft Graph permissions
 echo ""
