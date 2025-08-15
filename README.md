@@ -1,219 +1,227 @@
-# Azure Billing Analytics with Synapse - Automated Setup
+# Azure Billing Analytics with Synapse
 
-## 🚀 Overview
-This repository provides a fully automated solution for setting up Azure billing analytics using Azure Synapse Analytics with **Managed Identity authentication** (no tokens, never expires!). The script creates all necessary Azure resources, configures daily billing exports, and sets up a Synapse Analytics workspace for querying billing data.
+A comprehensive solution for automated Azure billing data export and analysis using Azure Synapse Analytics with **Managed Identity** authentication - no tokens, no expiration, no maintenance required!
 
-## ✨ Key Features
-- **Fully Automated Setup** - Single script creates everything
-- **Managed Identity Authentication** - No SAS tokens, never expires
-- **Daily Billing Export** - Automatic daily export to Azure Storage
-- **Azure Synapse Analytics** - Serverless SQL pool for billing analysis
+## 🚀 Features
+
+- **Automated Daily Billing Export** - Configures Azure Cost Management to export billing data daily
+- **Azure Synapse Analytics Integration** - Serverless SQL pool for querying billing data
+- **Managed Identity Authentication** - No SAS tokens or keys to manage, never expires
+- **Service Principal Setup** - Automated creation and configuration of `wiv_account`
+- **Comprehensive Permissions** - All required roles automatically assigned
 - **Remote Query Support** - Python client for programmatic access
-- **Zero Maintenance** - Uses Azure native authentication that works forever
+- **Single-Run Setup** - Enhanced retry logic ensures completion in one execution
+- **Idempotent Design** - Safe to run multiple times
 
 ## 📋 Prerequisites
+
 - Azure CLI installed and configured
-- Active Azure subscription with billing data
-- Permissions to create resources and assign roles
-- Python 3.x (for remote query client)
-- `pyodbc` and `pandas` (installed automatically by script)
+- Active Azure subscription
+- Bash shell environment
+- Python 3.x (for remote queries)
+- `pyodbc` and `pandas` (automatically installed by script)
 
-## 🛠️ Components Created
+## 🔧 Quick Start
 
-### Azure Resources
-- **Service Principal**: `wiv_account` for programmatic access
-- **Resource Group**: `wiv-rg` for all resources
-- **Storage Account**: For billing export data (Data Lake Gen2 enabled)
-- **Synapse Workspace**: `wiv-synapse-billing` for analytics
-- **Billing Export**: Daily automated export configuration
-
-### Database Objects
-- **Database**: `BillingAnalytics` in Synapse
-- **View**: `BillingData` for querying billing information
-- **Authentication**: Managed Identity with `abfss://` protocol
-
-## 📦 Installation & Setup
-
-### 1. Clone the Repository
+1. **Clone the repository:**
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+git clone -b feature/billing-export-synapse https://github.com/wiv-ai/AzureOnBoarding.git
+cd AzureOnBoarding
 ```
 
-### 2. Run the Setup Script
+2. **Run the setup script:**
 ```bash
-chmod +x startup_with_billing_synapse.sh
 ./startup_with_billing_synapse.sh
 ```
 
 The script will:
-1. Check for existing `wiv_account` service principal
-2. Create resource groups and storage accounts
-3. Configure daily billing export
-4. Create Synapse workspace
-5. Set up Managed Identity permissions
-6. Create database and views automatically
-7. Generate configuration files for remote access
+- Check for existing `wiv_account` service principal (create if needed)
+- Create resource group `wiv-rg` in `eastus2`
+- Set up storage account for billing exports
+- Configure daily billing export at midnight UTC
+- Create Synapse workspace `wiv-synapse-billing`
+- Set up Data Lake Storage Gen2
+- Configure firewall rules (including your IP)
+- Assign all necessary permissions
+- Create `BillingAnalytics` database
+- Set up `BillingData` view with Managed Identity
+- Trigger first billing export immediately
 
-### 3. Wait for First Export
-Billing data export runs daily. Your first data will appear within 24 hours.
+## 🏗️ Architecture
 
-## 🔐 Authentication Method
-
-### Managed Identity with abfss:// Protocol
-- **No Tokens Required** - Uses Azure native authentication
-- **Never Expires** - Works forever without maintenance
-- **Direct Access** - Uses Data Lake Gen2 endpoint
-- **Best Practice** - Microsoft recommended approach
-
-The system uses the `abfss://` protocol to directly access storage through Managed Identity:
-```sql
-OPENROWSET(
-    BULK 'abfss://billing-exports@storage.dfs.core.windows.net/path/*.csv',
-    FORMAT = 'CSV'
-)
 ```
+┌─────────────────────────────────────────────────────────┐
+│                    Azure Subscription                     │
+├─────────────────────────────────────────────────────────┤
+│                                                           │
+│  ┌──────────────┐        ┌──────────────────────┐       │
+│  │ Cost Mgmt    │───────▶│ Storage Account      │       │
+│  │ Daily Export │        │ (billingstorage*)    │       │
+│  └──────────────┘        └──────────────────────┘       │
+│                                    │                      │
+│                                    ▼                      │
+│                          ┌──────────────────────┐        │
+│                          │ Synapse Workspace    │        │
+│                          │ (wiv-synapse-billing)│        │
+│                          │                      │        │
+│                          │ ┌──────────────────┐ │        │
+│                          │ │ BillingAnalytics │ │        │
+│                          │ │    Database      │ │        │
+│                          │ └──────────────────┘ │        │
+│                          │          │           │        │
+│                          │          ▼           │        │
+│                          │ ┌──────────────────┐ │        │
+│                          │ │  BillingData     │ │        │
+│                          │ │     View         │ │        │
+│                          │ └──────────────────┘ │        │
+│                          └──────────────────────┘        │
+│                                    ▲                      │
+│                                    │                      │
+│                          ┌──────────────────────┐        │
+│                          │ Service Principal    │        │
+│                          │ (wiv_account)        │        │
+│                          │ + Managed Identity   │        │
+│                          └──────────────────────┘        │
+└─────────────────────────────────────────────────────────┘
+```
+
+## 🔐 Authentication & Security
+
+### Managed Identity (Primary Method)
+- **No tokens required** - Uses Azure's built-in identity system
+- **Never expires** - No maintenance needed
+- **Direct access** - Uses `abfss://` protocol for Data Lake Gen2
+- **Best practice** - Microsoft recommended approach
+
+### Service Principal Roles
+- Cost Management Reader
+- Monitoring Reader  
+- Storage Blob Data Reader (for Managed Identity)
+- Storage Blob Data Contributor
+- Contributor
+- Synapse Administrator
+- Synapse SQL Administrator
+- Synapse Contributor
 
 ## 📊 Querying Billing Data
 
 ### Option 1: Synapse Studio (Web UI)
 1. Navigate to https://web.azuresynapse.net
 2. Select your workspace: `wiv-synapse-billing`
-3. Connect to the **Built-in** serverless SQL pool
-4. Query the data:
+3. Open a new SQL script
+4. Connect to `Built-in` serverless SQL pool
+5. Run queries:
+
 ```sql
+-- Get all billing data
 SELECT * FROM BillingAnalytics.dbo.BillingData
-WHERE date >= DATEADD(day, -30, GETDATE())
+
+-- Daily cost summary
+SELECT 
+    CAST(date AS DATE) as BillingDate,
+    SUM(CAST(costInUsd AS FLOAT)) as DailyCostUSD,
+    COUNT(DISTINCT ResourceId) as ResourceCount
+FROM BillingAnalytics.dbo.BillingData
+GROUP BY CAST(date AS DATE)
+ORDER BY BillingDate DESC
 ```
 
-### Option 2: Python Client (Remote Access)
+### Option 2: Python Client
 ```python
-from synapse_remote_query_client import SynapseAPIClient
-
-# Client automatically uses synapse_config.py
-client = SynapseAPIClient()
-
-# Get daily costs
-df = client.get_daily_costs(days_back=7)
-print(df)
-
-# Get billing summary
-summary = client.get_billing_summary()
-print(summary)
+python3 synapse_remote_query_client.py
 ```
 
-### Option 3: Direct SQL Queries
-Use any SQL client that supports Azure AD authentication to connect to:
-- **Server**: `wiv-synapse-billing-ondemand.sql.azuresynapse.net`
-- **Database**: `BillingAnalytics`
-- **Authentication**: Azure AD
+This will show:
+- Daily costs for the last 7 days
+- Resource group billing summary
+- Top 10 resources by cost
+- Monthly cost trends
 
-## 📁 Repository Structure
-
-```
-/
-├── startup_with_billing_synapse.sh    # Main setup script
-├── synapse_remote_query_client.py     # Python client for remote queries
-├── test_synapse_connection.py         # Connection diagnostic tool
-├── synapse_config.py                  # Generated config (DO NOT COMMIT)
-├── README.md                           # This file
-└── .gitignore                         # Excludes sensitive files
-```
-
-## 🔧 Configuration Files
-
-### synapse_config.py (Auto-generated)
-Contains connection details and credentials. This file is:
-- Generated automatically by the setup script
-- Added to `.gitignore` to prevent accidental commits
-- Required for the Python client to work
-
-### Important Security Note
-**Never commit `synapse_config.py` to version control!** It contains sensitive credentials.
-
-## 🧪 Testing & Diagnostics
-
-### Test Connection
-```bash
+### Option 3: Test Connection
+```python
 python3 test_synapse_connection.py
 ```
 
-This will:
-- Verify service principal authentication
-- Check database existence
-- Test the BillingData view
-- Display sample data if available
+Validates:
+- Database connectivity
+- View functionality
+- Data availability
 
-## 📈 Available Queries
+## 🛠️ Enhanced Features
 
-The Python client includes pre-built queries:
-- `get_daily_costs()` - Daily cost breakdown
-- `get_billing_summary()` - Summary by resource group
-- `get_top_resources()` - Most expensive resources
-- `get_cost_by_location()` - Costs by Azure region
-- `get_monthly_trend()` - Month-over-month trending
+### Robust Retry Logic
+- **2.5-minute initial wait** after Synapse creation
+- **10 database creation attempts** with progressive backoff
+- **Smart error detection** for Azure initialization issues
+- **Automatic permission propagation** handling
 
-## 🚨 Troubleshooting
+### Automatic Billing Export
+- Triggers immediately after setup
+- Runs daily at midnight UTC
+- Data available in 5-30 minutes
+- Month-to-date cumulative data
 
-### Connection Timeout
-- Wait 5-10 minutes after setup for permissions to propagate
-- Ensure firewall rules allow your IP address
-- Check service principal has correct roles
+## 📁 Generated Files
 
-### No Billing Data
-- First export takes up to 24 hours
-- Check storage account for CSV files
-- Verify billing export is configured in Azure Portal
+| File | Purpose |
+|------|---------|
+| `synapse_config.py` | Python client configuration |
+| `billing_queries.sql` | Sample SQL queries |
+| `synapse_billing_setup.sql` | Manual backup SQL script |
 
-### Authentication Errors
-- Ensure `synapse_config.py` exists with correct credentials
-- Verify service principal hasn't been deleted
-- Check client secret hasn't expired (2-year default)
+## 🔍 Troubleshooting
 
-## 🔄 Maintenance
+### "Could not obtain exclusive lock on database"
+This is normal during initial Azure setup. The script automatically retries up to 10 times with progressive delays.
 
-### No Regular Maintenance Required!
-Thanks to Managed Identity:
-- ✅ No token renewal needed
-- ✅ No credential rotation required
-- ✅ No expiration dates to track
+### "Login failed for user"
+Permissions are still propagating. The script retries automatically with 15-second delays.
 
-### Only If Needed:
-- **Client Secret Renewal** (every 2 years): Re-run the script
-- **Add New Billing Accounts**: Re-run the script to update
+### "Content of directory cannot be listed"
+No billing data exported yet. Wait 5-30 minutes after setup for first export.
 
-## 📝 Roles & Permissions
+### Manual Database Setup
+If automated setup fails, use Synapse Studio:
+1. Open the workspace in Synapse Studio
+2. Run the SQL from `synapse_billing_setup.sql`
 
-The service principal is assigned:
-- Cost Management Reader
-- Monitoring Reader  
-- Storage Blob Data Reader
-- Synapse Administrator
-- Synapse SQL Administrator
-- Synapse Contributor
+## 📈 Sample Output
 
-## 🌟 Benefits of This Solution
+```
+Daily Costs (Last 7 Days):
+  BillingDate  DailyCostUSD  ResourceCount
+0  2025-08-14      0.005827              2
+1  2025-08-13      0.009680              2
+2  2025-08-12      0.009680              2
 
-1. **Zero Token Management** - Managed Identity never expires
+Top Resources by Cost:
+  ResourceId                     TotalCostUSD  ServiceFamily
+0  /subscriptions/.../storage    0.087234      Storage
+1  /subscriptions/.../compute    0.044432      Compute
+```
+
+## 🚀 Benefits of This Solution
+
+1. **Zero Maintenance** - Managed Identity never expires
 2. **Fully Automated** - Single script sets up everything
-3. **Production Ready** - Follows Azure best practices
-4. **Secure** - No secrets stored in code
-5. **Scalable** - Serverless architecture
-6. **Cost Effective** - Pay only for queries executed
+3. **Production Ready** - Robust error handling and retries
+4. **Cost Visibility** - Daily insights into Azure spending
+5. **Scalable** - Serverless architecture grows with your data
+6. **Secure** - No hardcoded credentials or tokens
 
-## 📞 Support
+## 📝 Notes
 
-For issues or questions:
-1. Check the troubleshooting section
-2. Run `test_synapse_connection.py` for diagnostics
-3. Review Azure Portal for resource status
-4. Check Synapse Studio for query errors
+- First billing export takes 5-30 minutes
+- Daily exports run at midnight UTC
+- Each export contains month-to-date cumulative data
+- Synapse serverless SQL pool scales automatically
+- No dedicated SQL pools required (cost-effective)
 
-## 📜 License
+## 🤝 Contributing
 
-[Your License Here]
+Feel free to submit issues and enhancement requests!
 
-## 🙏 Acknowledgments
+## 📄 License
 
-Built with Azure Synapse Analytics and Azure Cost Management APIs.
+This project is part of the Azure Onboarding suite by wiv.ai
 
