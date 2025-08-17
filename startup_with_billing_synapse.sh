@@ -204,13 +204,14 @@ STORAGE_RESOURCE_ID=$(az storage account show \
 # Create the export using REST API (as CLI doesn't have direct support)
 # Use portable date handling that works on both macOS and Linux
 echo "📅 Setting up billing export date range..."
+# Use current date as start (Azure doesn't allow past dates)
+CURRENT_DATE=$(date +%Y-%m-%d)
 CURRENT_YEAR=$(date +%Y)
-CURRENT_MONTH=$(date +%m)
-CURRENT_DAY=$(date +%d)
 FUTURE_YEAR=$((CURRENT_YEAR + 5))
+FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
 
-START_DATE="${CURRENT_YEAR}-${CURRENT_MONTH}-${CURRENT_DAY}T00:00:00Z"
-END_DATE="${FUTURE_YEAR}-${CURRENT_MONTH}-${CURRENT_DAY}T00:00:00Z"
+START_DATE="${CURRENT_DATE}T00:00:00Z"
+END_DATE="${FUTURE_DATE}T00:00:00Z"
 
 echo "   Export period: $START_DATE to $END_DATE"
 
@@ -292,6 +293,14 @@ if [[ "$EXPORT_RESPONSE" == *"error"* ]] || [[ "$EXPORT_RESPONSE" == *"BadReques
             2>/dev/null
         
         sleep 2
+        
+        # Ensure dates are current for retry
+        CURRENT_DATE=$(date +%Y-%m-%d)
+        CURRENT_YEAR=$(date +%Y)
+        FUTURE_YEAR=$((CURRENT_YEAR + 5))
+        FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
+        START_DATE="${CURRENT_DATE}T00:00:00Z"
+        END_DATE="${FUTURE_DATE}T00:00:00Z"
         
         # Create export config file for cleaner JSON handling
         cat > /tmp/export_config_$$.json <<EXPORTJSON
