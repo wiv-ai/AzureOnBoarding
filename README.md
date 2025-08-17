@@ -5,11 +5,15 @@ A comprehensive solution for automated Azure billing data export and analysis us
 ## 🚀 Features
 
 - **Automated Daily Billing Export** - Configures Azure Cost Management to export billing data daily
+- **Support for Existing Exports** - Use existing billing exports from any subscription
+- **Cross-Subscription Support** - Access billing data from different subscriptions
+- **Automatic Data Deduplication** - Smart view queries only the latest export to prevent duplication
 - **Azure Synapse Analytics Integration** - Serverless SQL pool for querying billing data
 - **Managed Identity Authentication** - No SAS tokens or keys to manage, never expires
 - **Service Principal Setup** - Automated creation and configuration of `wiv_account`
 - **Comprehensive Permissions** - All required roles automatically assigned
 - **Remote Query Support** - Python client for programmatic access
+- **Multiple SQL Execution Methods** - Fallback options ensure database setup completes
 - **Single-Run Setup** - Enhanced retry logic ensures completion in one execution
 - **Idempotent Design** - Safe to run multiple times
 
@@ -19,9 +23,11 @@ A comprehensive solution for automated Azure billing data export and analysis us
 - Active Azure subscription
 - Bash shell environment
 - Python 3.x (for remote queries)
-- `pyodbc` and `pandas` (automatically installed by script)
+- Optional: `sqlcmd` for direct SQL execution (auto-installed if missing)
 
 ## 🔧 Quick Start
+
+### Option 1: Fresh Setup with New Billing Export
 
 1. **Clone the repository:**
 ```bash
@@ -34,55 +40,72 @@ cd AzureOnBoarding
 ./startup_with_billing_synapse.sh
 ```
 
+When prompted:
+```
+Use existing billing export? (y/n): n
+```
+
+The script will create everything from scratch.
+
+### Option 2: Use Existing Billing Export
+
+```bash
+./startup_with_billing_synapse.sh
+```
+
+When prompted:
+```
+Use existing billing export? (y/n): y
+Storage Account Name: myorgstorage123
+Storage Account Resource Group: billing-rg
+Storage Account Subscription ID: [Enter or press Enter for current]
+Container Name: cost-exports
+Export folder path: monthly-exports/ActualCost
+```
+
 The script will:
-- Check for existing `wiv_account` service principal (create if needed)
-- Create resource group `wiv-rg` in `eastus2`
-- Set up storage account for billing exports
-- Configure daily billing export at midnight UTC
-- Create Synapse workspace `wiv-synapse-billing`
-- Set up Data Lake Storage Gen2
-- Configure firewall rules (including your IP)
-- Assign all necessary permissions
-- Create `BillingAnalytics` database
-- Set up `BillingData` view with Managed Identity
-- Trigger first billing export immediately
+- Verify access to existing storage
+- Configure Synapse to read from your existing exports
+- Skip creating duplicate billing exports
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Azure Subscription                     │
-├─────────────────────────────────────────────────────────┤
-│                                                           │
-│  ┌──────────────┐        ┌──────────────────────┐       │
-│  │ Cost Mgmt    │───────▶│ Storage Account      │       │
-│  │ Daily Export │        │ (billingstorage*)    │       │
-│  └──────────────┘        └──────────────────────┘       │
-│                                    │                      │
-│                                    ▼                      │
-│                          ┌──────────────────────┐        │
-│                          │ Synapse Workspace    │        │
-│                          │ (wiv-synapse-billing)│        │
-│                          │                      │        │
-│                          │ ┌──────────────────┐ │        │
-│                          │ │ BillingAnalytics │ │        │
-│                          │ │    Database      │ │        │
-│                          │ └──────────────────┘ │        │
-│                          │          │           │        │
-│                          │          ▼           │        │
-│                          │ ┌──────────────────┐ │        │
-│                          │ │  BillingData     │ │        │
-│                          │ │     View         │ │        │
-│                          │ └──────────────────┘ │        │
-│                          └──────────────────────┘        │
-│                                    ▲                      │
-│                                    │                      │
-│                          ┌──────────────────────┐        │
-│                          │ Service Principal    │        │
-│                          │ (wiv_account)        │        │
-│                          │ + Managed Identity   │        │
-│                          └──────────────────────┘        │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Azure Subscription(s)                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌──────────────┐        ┌──────────────────────┐               │
+│  │ Cost Mgmt    │───────▶│ Storage Account      │               │
+│  │ Daily Export │        │ (new or existing)    │               │
+│  └──────────────┘        └──────────────────────┘               │
+│                                    │                              │
+│                          Cross-subscription                       │
+│                            access supported                       │
+│                                    ▼                              │
+│                          ┌──────────────────────┐                │
+│                          │ Synapse Workspace    │                │
+│                          │ (wiv-synapse-billing)│                │
+│                          │                      │                │
+│                          │ ┌──────────────────┐ │                │
+│                          │ │ BillingAnalytics │ │                │
+│                          │ │    Database      │ │                │
+│                          │ └──────────────────┘ │                │
+│                          │          │           │                │
+│                          │          ▼           │                │
+│                          │ ┌──────────────────┐ │                │
+│                          │ │  BillingData     │ │                │
+│                          │ │  View (Deduped)  │ │                │
+│                          │ └──────────────────┘ │                │
+│                          └──────────────────────┘                │
+│                                    ▲                              │
+│                                    │                              │
+│                          ┌──────────────────────┐                │
+│                          │ Service Principal    │                │
+│                          │ (wiv_account)        │                │
+│                          │ + Managed Identity   │                │
+│                          └──────────────────────┘                │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## 🔐 Authentication & Security
@@ -91,6 +114,7 @@ The script will:
 - **No tokens required** - Uses Azure's built-in identity system
 - **Never expires** - No maintenance needed
 - **Direct access** - Uses `abfss://` protocol for Data Lake Gen2
+- **Cross-subscription** - Can access storage in different subscriptions
 - **Best practice** - Microsoft recommended approach
 
 ### Service Principal Roles
@@ -103,6 +127,44 @@ The script will:
 - Synapse SQL Administrator
 - Synapse Contributor
 
+## 📊 Understanding Billing Data
+
+### The Deduplication Challenge
+Azure Cost Management exports are **cumulative month-to-date**:
+- **Day 1**: Contains only Day 1 costs
+- **Day 2**: Contains Day 1 + Day 2 costs
+- **Day 30**: Contains entire month's data
+
+**⚠️ Problem**: Querying all files causes massive duplication!
+
+### The Solution: Automatic Deduplication
+The `BillingData` view automatically queries only the **latest export file**:
+
+```sql
+-- The view handles deduplication internally
+SELECT * FROM BillingAnalytics.dbo.BillingData
+-- This automatically returns only the latest data!
+```
+
+No need for complex CTEs or manual filtering - it's built-in!
+
+## 💰 Cost Analysis
+
+### Deployment Costs (Monthly)
+
+| Organization Size | Resources | Data Size | Query Cost | Storage Cost | **Total** |
+|-------------------|-----------|-----------|------------|--------------|-----------|
+| Small | <100 | <1GB | $0.01 | $0.05 | **$0.06** |
+| Medium | 500-1000 | 10GB | $1.50 | $0.10 | **$1.60** |
+| Large | 5000-10000 | 100GB | $15.00 | $0.50 | **$15.50** |
+| Enterprise | 100000+ | 1TB+ | $150.00 | $5.00 | **$155.00** |
+
+**Key Points:**
+- Synapse Serverless: **$5 per TB queried**
+- Storage: **$0.02 per GB/month**
+- No idle costs - pay only when querying
+- No minimum fees or commitments
+
 ## 📊 Querying Billing Data
 
 ### Option 1: Synapse Studio (Web UI)
@@ -113,7 +175,7 @@ The script will:
 5. Run queries:
 
 ```sql
--- Get all billing data
+-- Get latest billing data (automatically deduplicated!)
 SELECT * FROM BillingAnalytics.dbo.BillingData
 
 -- Daily cost summary
@@ -124,6 +186,15 @@ SELECT
 FROM BillingAnalytics.dbo.BillingData
 GROUP BY CAST(date AS DATE)
 ORDER BY BillingDate DESC
+
+-- Top 10 expensive resources
+SELECT TOP 10
+    resourceId,
+    resourceGroup,
+    SUM(CAST(costInUsd AS FLOAT)) as TotalCost
+FROM BillingAnalytics.dbo.BillingData
+GROUP BY resourceId, resourceGroup
+ORDER BY TotalCost DESC
 ```
 
 ### Option 2: Python Client
@@ -131,91 +202,112 @@ ORDER BY BillingDate DESC
 python3 synapse_remote_query_client.py
 ```
 
-This will show:
-- Daily costs for the last 7 days
-- Resource group billing summary
-- Top 10 resources by cost
-- Monthly cost trends
-
 ### Option 3: Test Connection
 ```python
-python3 test_synapse_connection.py
+python3 test_remote_query.py
 ```
 
-Validates:
-- Database connectivity
-- View functionality
-- Data availability
+## 🛠️ Export Configuration Options
 
-## 🛠️ Enhanced Features
+### Data Type Selection
 
-### Robust Retry Logic
-- **2.5-minute initial wait** after Synapse creation
-- **10 database creation attempts** with progressive backoff
-- **Smart error detection** for Azure initialization issues
-- **Automatic permission propagation** handling
+| Type | Use Case | What It Shows |
+|------|----------|---------------|
+| **ActualCost** (Default) | Invoice matching, showback | Real charges as on invoice |
+| **AmortizedCost** | Budgeting with reservations | Spreads reservation costs |
+| **Usage** | Technical analysis | Raw consumption, no costs |
 
-### Automatic Billing Export
-- Triggers immediately after setup
-- Runs daily at midnight UTC
-- Data available in 5-30 minutes
-- Month-to-date cumulative data
+### Compression Options
 
-## 📁 Generated Files
+| Type | Storage Size | Synapse Support | Recommendation |
+|------|--------------|-----------------|----------------|
+| **None** (Default) | 100% | ✅ Direct query | Use this |
+| **GZip** | 10-20% | ❌ Needs ETL | Only for archival |
 
-| File | Purpose |
-|------|---------|
-| `synapse_config.py` | Python client configuration |
-| `billing_queries.sql` | Sample SQL queries |
-| `synapse_billing_setup.sql` | Manual backup SQL script |
+### Dataset Versions
+
+| Version | Schema | Columns | Future-Proof | Use When |
+|---------|--------|---------|--------------|----------|
+| **Legacy** (Default) | Azure-specific | 200+ | Stable | Existing systems |
+| **FOCUS** | Multi-cloud standard | ~50 | ✅ | New deployments |
 
 ## 🔍 Troubleshooting
 
-### "Could not obtain exclusive lock on database"
-This is normal during initial Azure setup. The script automatically retries up to 10 times with progressive delays.
+### Common Issues
 
-### "Login failed for user"
-Permissions are still propagating. The script retries automatically with 15-second delays.
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| "Could not obtain exclusive lock" | Azure initialization | Script auto-retries 10x |
+| "Login failed for user" | Permission propagation | Auto-retry with delays |
+| "Content cannot be listed" | No data yet | Wait 5-30 min for export |
+| "Date: illegal option" | macOS date command | Script handles automatically |
+| "Invalid column: CostInUsd" | Case sensitivity | Fixed to "CostInUSD" |
+| "pyodbc installation failed" | Missing dependencies | Script uses fallback methods |
 
-### "Content of directory cannot be listed"
-No billing data exported yet. Wait 5-30 minutes after setup for first export.
+### Manual Fallbacks
 
-### Manual Database Setup
-If automated setup fails, use Synapse Studio:
-1. Open the workspace in Synapse Studio
-2. Run the SQL from `synapse_billing_setup.sql`
+If automated setup fails:
 
-## 📈 Sample Output
+1. **SQL via Synapse Studio:**
+   - Open workspace in Azure Portal
+   - Run SQL from `synapse_billing_setup.sql`
 
+2. **SQL via generated script:**
+   ```bash
+   ./complete_synapse_setup.sh
+   ```
+
+## 📈 Sample Queries
+
+### Cost Optimization Analysis
+```sql
+-- Find unused resources (no cost in last 7 days)
+WITH RecentCosts AS (
+    SELECT DISTINCT resourceId
+    FROM BillingAnalytics.dbo.BillingData
+    WHERE CAST(date AS DATE) >= DATEADD(day, -7, GETDATE())
+      AND CAST(costInUsd AS FLOAT) > 0
+)
+SELECT DISTINCT b.resourceId, b.resourceGroup
+FROM BillingAnalytics.dbo.BillingData b
+WHERE b.resourceId NOT IN (SELECT resourceId FROM RecentCosts)
+  AND b.resourceId IS NOT NULL
 ```
-Daily Costs (Last 7 Days):
-  BillingDate  DailyCostUSD  ResourceCount
-0  2025-08-14      0.005827              2
-1  2025-08-13      0.009680              2
-2  2025-08-12      0.009680              2
 
-Top Resources by Cost:
-  ResourceId                     TotalCostUSD  ServiceFamily
-0  /subscriptions/.../storage    0.087234      Storage
-1  /subscriptions/.../compute    0.044432      Compute
+### Department Chargeback
+```sql
+-- Costs by resource group (department)
+SELECT 
+    resourceGroup as Department,
+    DATEPART(YEAR, date) as Year,
+    DATEPART(MONTH, date) as Month,
+    SUM(CAST(costInUsd AS FLOAT)) as MonthlyCharge
+FROM BillingAnalytics.dbo.BillingData
+WHERE resourceGroup IS NOT NULL
+GROUP BY resourceGroup, DATEPART(YEAR, date), DATEPART(MONTH, date)
+ORDER BY Year DESC, Month DESC, MonthlyCharge DESC
 ```
 
 ## 🚀 Benefits of This Solution
 
 1. **Zero Maintenance** - Managed Identity never expires
-2. **Fully Automated** - Single script sets up everything
-3. **Production Ready** - Robust error handling and retries
-4. **Cost Visibility** - Daily insights into Azure spending
-5. **Scalable** - Serverless architecture grows with your data
-6. **Secure** - No hardcoded credentials or tokens
+2. **Automatic Deduplication** - No complex queries needed
+3. **Cross-Subscription** - Centralized billing analysis
+4. **Flexible Setup** - Works with new or existing exports
+5. **Cost Effective** - Pay only for queries, not idle time
+6. **Production Ready** - Robust error handling and retries
+7. **Multiple Fallbacks** - Ensures successful deployment
+8. **Fully Automated** - Single script sets up everything
 
 ## 📝 Notes
 
 - First billing export takes 5-30 minutes
 - Daily exports run at midnight UTC
 - Each export contains month-to-date cumulative data
+- The BillingData view automatically handles deduplication
 - Synapse serverless SQL pool scales automatically
 - No dedicated SQL pools required (cost-effective)
+- Cross-subscription access requires proper permissions
 
 ## 🤝 Contributing
 
