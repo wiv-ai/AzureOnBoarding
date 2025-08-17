@@ -133,6 +133,152 @@ GROUP BY Date, ServiceFamily
 - Queries: Continuous monitoring and reporting
 - **Monthly cost: $50-100**
 
+### Scenario 5: Very Large Enterprise (100,000+ Azure resources)
+- **Daily billing data size**: ~2-5 GB per export
+- **Monthly data accumulation**: ~60-150 GB (30 days)
+- **Yearly data volume**: ~720-1,800 GB
+
+#### Detailed Cost Breakdown:
+
+**1. Storage Costs:**
+- **Billing Export Storage** (Hot tier): 
+  - Monthly: 150 GB × $0.0184 = **$2.76/month**
+  - Yearly (with retention): 1,800 GB × $0.0184 = **$33.12/year**
+
+**2. Synapse Query Costs:**
+Depends on query patterns:
+
+| Query Pattern | Data Scanned | Cost per Query | Monthly Cost |
+|--------------|--------------|----------------|--------------|
+| **Daily Dashboard** (latest file only) | 5 GB | $0.025 | $0.75 (30 queries) |
+| **Weekly Analysis** (7 days) | 35 GB | $0.175 | $0.70 (4 queries) |
+| **Monthly Report** (full month) | 150 GB | $0.75 | $0.75 (1 query) |
+| **Ad-hoc Queries** (various) | ~200 GB/month | $1.00 | $1.00 |
+| **Multiple Teams** (50 users, daily) | ~1 TB/month | $5.00 | $5.00 |
+
+**Estimated Query Costs**: **$8-50/month** depending on usage
+
+**3. Total Monthly Estimate:**
+- **Light Usage** (few queries): ~$11/month
+- **Moderate Usage** (daily dashboards): ~$25/month  
+- **Heavy Usage** (multiple teams, frequent queries): ~$50-75/month
+- **Very Heavy Usage** (real-time monitoring, APIs): ~$100-150/month
+
+#### Cost Optimization Strategies for Large Scale:
+
+**1. Implement Query Result Caching:**
+```python
+# Cache query results for frequently accessed data
+import redis
+import hashlib
+import json
+
+def get_cached_or_query(client, query, cache_hours=4):
+    cache_key = hashlib.md5(query.encode()).hexdigest()
+    
+    # Check cache first
+    cached = redis_client.get(cache_key)
+    if cached:
+        return json.loads(cached)
+    
+    # Execute query if not cached
+    result = client.execute_query_odbc(query)
+    
+    # Cache the result
+    redis_client.setex(
+        cache_key, 
+        cache_hours * 3600,
+        result.to_json()
+    )
+    return result
+```
+
+**2. Create Materialized Views (Pre-aggregated):**
+```sql
+-- Create daily summary table (run once per day)
+CREATE TABLE DailySummaryCache AS
+SELECT 
+    CAST(Date AS DATE) as Date,
+    ServiceFamily,
+    ResourceGroupName,
+    SubscriptionId,
+    SUM(CAST(CostInUSD AS FLOAT)) as TotalCost,
+    COUNT(*) as TransactionCount
+FROM BillingDataLatest
+GROUP BY CAST(Date AS DATE), ServiceFamily, 
+         ResourceGroupName, SubscriptionId;
+
+-- Query the cache instead of raw data (100x faster)
+SELECT * FROM DailySummaryCache 
+WHERE Date >= DATEADD(day, -30, GETDATE());
+```
+
+**3. Partition Queries by Department/Subscription:**
+```sql
+-- Instead of scanning all 100,000 resources at once
+-- Query specific subscriptions/departments
+SELECT * FROM BillingDataLatest
+WHERE SubscriptionId IN ('sub1', 'sub2', 'sub3')
+  AND Date >= DATEADD(day, -7, GETDATE());
+```
+
+**4. Use Incremental Processing:**
+```python
+# Process only new data since last run
+last_processed_date = get_last_processed_date()
+query = f"""
+SELECT * FROM BillingDataLatest
+WHERE Date > '{last_processed_date}'
+"""
+```
+
+#### Alternative Architectures for 100,000+ Resources:
+
+| Solution | Monthly Cost | Pros | Cons |
+|----------|-------------|------|------|
+| **Synapse Serverless (Optimized)** | $25-75 | Flexible, No fixed cost | Requires optimization |
+| **Synapse Dedicated Pool (DW100c)** | $1,100 | Fast queries, Predictable | High fixed cost |
+| **Azure Data Explorer** | $200-500 | Real-time analytics | Complex setup |
+| **Databricks** | $500-1,500 | Advanced analytics | Expensive, Complex |
+| **Custom Solution (VMs + PostgreSQL)** | $200-400 | Full control | Maintenance overhead |
+
+#### Recommended Architecture for 100,000 Resources:
+
+```
+┌─────────────────────────────────────────┐
+│         Cost Management Export          │
+│         (2-5 GB daily CSV files)        │
+└────────────────┬────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│        Azure Storage Account            │
+│      ($3/month for 150 GB hot tier)     │
+└────────────────┬────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│    Synapse Serverless SQL Pool          │
+│         (Process daily into cache)       │
+│         ($5-10/month for ETL)           │
+└────────────────┬────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│      Cached/Aggregated Tables           │
+│    (Query these instead of raw data)    │
+│         ($5-10/month for queries)       │
+└────────────────┬────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│     Dashboards / APIs / Reports         │
+│         (Power BI, Grafana, etc.)       │
+└─────────────────────────────────────────┘
+```
+
+**Total Optimized Cost: $25-50/month** for 100,000 resources
+
 ## Hidden Costs to Consider
 
 ### ⚠️ Potential Additional Costs:
