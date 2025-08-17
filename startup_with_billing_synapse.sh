@@ -689,14 +689,25 @@ for retry in range(max_setup_retries):
             else:
                 print(f"⚠️ Master key: {str(e)[:100]}")
         
-        # Drop and create view
+        # Drop old view if exists and create improved view
         try:
             cursor.execute("IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData') DROP VIEW BillingData")
         except:
             pass
         
+        # Create improved view that automatically gets only the latest export file
+        # This prevents data duplication from cumulative month-to-date exports
         cursor.execute(f"""
             CREATE VIEW BillingData AS
+            WITH LatestExport AS (
+                SELECT MAX(filepath(1)) as LatestPath
+                FROM OPENROWSET(
+                    BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                    FORMAT = 'CSV',
+                    PARSER_VERSION = '2.0',
+                    FIRSTROW = 2
+                ) AS files
+            )
             SELECT *
             FROM OPENROWSET(
                 BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
@@ -730,8 +741,9 @@ for retry in range(max_setup_retries):
                 unitOfMeasure NVARCHAR(100),
                 tags NVARCHAR(4000)
             ) AS BillingData
+            WHERE filepath(1) = (SELECT LatestPath FROM LatestExport)
         """)
-        print("✅ BillingData view created")
+        print("✅ BillingData view created (with automatic latest file filtering)")
         
         cursor.close()
         conn.close()
@@ -760,13 +772,14 @@ if setup_success:
     print("\n✅ Synapse database setup completed successfully!")
     
     # Test the view
-    print("\n🔍 Testing the view...")
+    print("\n🔍 Testing the view (automatically filters latest export)...")
     try:
         test_conn = pyodbc.connect(billing_conn_str)
         test_cursor = test_conn.cursor()
         test_cursor.execute("SELECT COUNT(*) as RecordCount FROM BillingData")
         row = test_cursor.fetchone()
-        print(f"✅ View is working! Found {row[0]} billing records")
+        print(f"✅ View is working! Found {row[0]} billing records (from latest export only)")
+        print("   ℹ️  View automatically filters to latest file to prevent duplication")
         test_cursor.close()
         test_conn.close()
     except Exception as e:
@@ -784,6 +797,7 @@ else:
 
 print("\n📊 Query to use in Synapse Studio:")
 print("   SELECT * FROM BillingAnalytics.dbo.BillingData")
+print("   ℹ️  Note: View automatically returns only latest export data (no duplication)")
 PYTHON_EOF
 
 # Check if Python and pyodbc are available
@@ -875,9 +889,20 @@ GO
 CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
 GO
 
+-- Improved view that automatically queries only the latest export file
+-- This prevents data duplication since each export contains cumulative month-to-date data
 -- Using Managed Identity with abfss:// protocol (NEVER EXPIRES!)
--- No credentials or data sources needed - direct access via Managed Identity
 CREATE VIEW BillingData AS
+WITH LatestExport AS (
+    -- Find the most recent export file
+    SELECT MAX(filepath(1)) as LatestPath
+    FROM OPENROWSET(
+        BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+        FORMAT = 'CSV',
+        PARSER_VERSION = '2.0',
+        FIRSTROW = 2
+    ) AS files
+)
 SELECT *
 FROM OPENROWSET(
     BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
@@ -910,7 +935,8 @@ WITH (
     frequency NVARCHAR(100),
     unitOfMeasure NVARCHAR(100),
     tags NVARCHAR(4000)
-) AS BillingData;
+) AS BillingData
+WHERE filepath(1) = (SELECT LatestPath FROM LatestExport);
 GO
 EOF
 
@@ -956,105 +982,53 @@ echo "✅ Python configuration saved to: synapse_config.py"
 
 # Save query for reference
 cat > billing_queries.sql <<EOF
--- Query billing data directly from storage (serverless SQL pool)
--- No setup required - just run these queries in Synapse Studio
+-- ========================================================
+-- BILLING DATA QUERIES - OPTIMIZED VERSION
+-- ========================================================
+-- The BillingData view now AUTOMATICALLY prevents duplication!
+-- No need for complex CTE patterns - just query the view directly
+--
+-- Background: Each daily export contains cumulative month-to-date data
+-- The improved view automatically filters to only the latest export file
+-- This means you get accurate, non-duplicated data with simple queries
+-- ========================================================
 
--- IMPORTANT: Each daily export contains month-to-date data (cumulative)
--- To avoid duplication, query only the latest file or use DISTINCT
+-- 1. Simple query - automatically gets latest data without duplication
+SELECT * FROM BillingAnalytics.dbo.BillingData
+WHERE CAST(Date AS DATE) >= DATEADD(day, -7, GETDATE())
 
--- 1. Get latest billing data (most recent export file)
--- This gets the latest complete dataset without duplication
-WITH LatestFile AS (
-    SELECT MAX(filepath(1)) as LatestPath
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS files
-)
-SELECT * FROM OPENROWSET(
-    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
-
--- 2. Query specific date range (from latest export)
+-- 2. Query specific date range
 -- Replace '2024-08-01' and '2024-08-10' with your desired dates
-WITH LatestFile AS (
-    SELECT MAX(filepath(1)) as LatestPath
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS files
-)
-SELECT * FROM OPENROWSET(
-    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
-  AND CAST(Date AS DATE) BETWEEN '2024-08-01' AND '2024-08-10'
+SELECT * FROM BillingAnalytics.dbo.BillingData
+WHERE CAST(Date AS DATE) BETWEEN '2024-08-01' AND '2024-08-10'
 
--- 3. Daily cost summary for specific date range
-WITH LatestFile AS (
-    SELECT MAX(filepath(1)) as LatestPath
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS files
-)
+-- 3. Daily cost summary for last 7 days
 SELECT 
     CAST(Date AS DATE) as BillingDate,
     ServiceFamily,
-    ResourceGroup,
+    ResourceGroupName,
     SUM(CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
     COUNT(DISTINCT ResourceId) as ResourceCount
-FROM OPENROWSET(
-    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
-  AND CAST(Date AS DATE) BETWEEN DATEADD(day, -7, GETDATE()) AND GETDATE()
-GROUP BY CAST(Date AS DATE), ServiceFamily, ResourceGroup
+FROM BillingAnalytics.dbo.BillingData
+WHERE CAST(Date AS DATE) BETWEEN DATEADD(day, -7, GETDATE()) AND GETDATE()
+GROUP BY CAST(Date AS DATE), ServiceFamily, ResourceGroupName
 ORDER BY BillingDate DESC
 
 -- 4. Compare costs between two date ranges
-WITH LatestFile AS (
-    SELECT MAX(filepath(1)) as LatestPath
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS files
-),
-CurrentWeek AS (
+WITH CurrentWeek AS (
     SELECT 
         ServiceFamily,
         SUM(CAST(CostInUSD AS FLOAT)) as CurrentCost
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS BillingData
-    WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
-      AND CAST(Date AS DATE) BETWEEN DATEADD(day, -7, GETDATE()) AND GETDATE()
+    FROM BillingAnalytics.dbo.BillingData
+    WHERE CAST(Date AS DATE) BETWEEN DATEADD(day, -7, GETDATE()) AND GETDATE()
     GROUP BY ServiceFamily
 ),
 PreviousWeek AS (
     SELECT 
         ServiceFamily,
         SUM(CAST(CostInUSD AS FLOAT)) as PreviousCost
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS BillingData
-    WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
-      AND CAST(Date AS DATE) BETWEEN DATEADD(day, -14, GETDATE()) AND DATEADD(day, -8, GETDATE())
+    FROM BillingAnalytics.dbo.BillingData
+    WHERE CAST(Date AS DATE) BETWEEN DATEADD(day, -14, GETDATE()) AND DATEADD(day, -8, GETDATE())
     GROUP BY ServiceFamily
 )
 SELECT 
@@ -1072,25 +1046,12 @@ FULL OUTER JOIN PreviousWeek p ON c.ServiceFamily = p.ServiceFamily
 ORDER BY ThisWeekCost DESC
 
 -- 5. Monthly cost by day (for charting)
-WITH LatestFile AS (
-    SELECT MAX(filepath(1)) as LatestPath
-    FROM OPENROWSET(
-        BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-        FORMAT = 'CSV',
-        HEADER_ROW = TRUE
-    ) AS files
-)
 SELECT 
     CAST(Date AS DATE) as BillingDate,
     SUM(CAST(CostInUSD AS FLOAT)) as DailyCost,
     SUM(SUM(CAST(CostInUSD AS FLOAT))) OVER (ORDER BY CAST(Date AS DATE)) as CumulativeCost
-FROM OPENROWSET(
-    BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/billing-data/*.csv',
-    FORMAT = 'CSV',
-    HEADER_ROW = TRUE
-) AS BillingData
-WHERE filepath(1) = (SELECT LatestPath FROM LatestFile)
-  AND MONTH(CAST(Date AS DATE)) = MONTH(GETDATE())
+FROM BillingAnalytics.dbo.BillingData
+WHERE MONTH(CAST(Date AS DATE)) = MONTH(GETDATE())
   AND YEAR(CAST(Date AS DATE)) = YEAR(GETDATE())
 GROUP BY CAST(Date AS DATE)
 ORDER BY BillingDate
@@ -1198,6 +1159,7 @@ echo "📝 Next Steps:"
 echo "   1. ✅ Synapse database automatically configured with Managed Identity"
 echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
 echo "   3. Query data: SELECT * FROM BillingAnalytics.dbo.BillingData"
+echo "      ℹ️  View automatically filters to latest export (no duplication!)"
 echo "   4. Access Synapse Studio: https://web.azuresynapse.net"
 echo ""
 echo "📊 Generated files:"
