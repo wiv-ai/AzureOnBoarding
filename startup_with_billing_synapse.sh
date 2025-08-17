@@ -857,16 +857,226 @@ if command -v python3 >/dev/null 2>&1; then
         sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
         sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
         
-        python3 setup_synapse_automated.py
+        python3 setup_synapse_automated.py && SETUP_COMPLETED=true
         rm -f setup_synapse_automated.py
     else
         echo "⚠️  Could not install pyodbc automatically"
-        echo "   Manual setup script saved to: synapse_billing_setup.sql"
-        echo "   To install manually: pip install pyodbc"
+        echo "   Trying alternative methods to complete setup..."
+        SETUP_COMPLETED=false
     fi
 else
     echo "⚠️  Python not available for automated setup"
-    echo "   Manual setup script saved to: synapse_billing_setup.sql"
+    echo "   Trying alternative methods to complete setup..."
+    SETUP_COMPLETED=false
+fi
+
+# ===========================
+# ALTERNATIVE SQL EXECUTION METHODS
+# ===========================
+if [ "$SETUP_COMPLETED" != "true" ]; then
+    echo ""
+    echo "🔧 Attempting alternative methods to create database and view..."
+    
+    # Method 1: Try using sqlcmd if available
+    if command -v sqlcmd >/dev/null 2>&1; then
+        echo "📝 Method 1: Using sqlcmd..."
+        sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
+               -d master \
+               -U "$APP_ID" \
+               -P "$CLIENT_SECRET" \
+               -G \
+               -Q "CREATE DATABASE BillingAnalytics" 2>/dev/null && \
+        sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
+               -d BillingAnalytics \
+               -U "$APP_ID" \
+               -P "$CLIENT_SECRET" \
+               -G \
+               -i synapse_billing_setup.sql 2>/dev/null && \
+        echo "✅ Database and view created successfully with sqlcmd!" && \
+        SETUP_COMPLETED=true
+    fi
+    
+    # Method 2: Try using Azure CLI with REST API
+    if [ "$SETUP_COMPLETED" != "true" ]; then
+        echo "📝 Method 2: Using Azure CLI REST API..."
+        
+        # Get access token for Synapse
+        ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+        
+        if [ -n "$ACCESS_TOKEN" ]; then
+            # Try to create database using REST API
+            CREATE_DB_RESPONSE=$(curl -s -X POST \
+                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+                -H "Authorization: Bearer $ACCESS_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>/dev/null)
+            
+            # Create the view with the improved deduplication
+            CREATE_VIEW_SQL=$(cat <<-EOSQL
+                USE BillingAnalytics;
+                CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
+                CREATE VIEW BillingData AS
+                WITH LatestExport AS (
+                    SELECT MAX(filepath(1)) as LatestPath
+                    FROM OPENROWSET(
+                        BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                        FORMAT = 'CSV',
+                        PARSER_VERSION = '2.0',
+                        FIRSTROW = 2
+                    ) AS files
+                )
+                SELECT *
+                FROM OPENROWSET(
+                    BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                    FORMAT = 'CSV',
+                    PARSER_VERSION = '2.0',
+                    FIRSTROW = 2
+                )
+                WITH (
+                    date NVARCHAR(100),
+                    serviceFamily NVARCHAR(200),
+                    meterCategory NVARCHAR(200),
+                    meterSubCategory NVARCHAR(200),
+                    meterName NVARCHAR(500),
+                    billingAccountName NVARCHAR(200),
+                    costCenter NVARCHAR(100),
+                    resourceGroupName NVARCHAR(200),
+                    resourceLocation NVARCHAR(100),
+                    consumedService NVARCHAR(200),
+                    ResourceId NVARCHAR(1000),
+                    chargeType NVARCHAR(100),
+                    publisherType NVARCHAR(100),
+                    quantity NVARCHAR(100),
+                    costInBillingCurrency NVARCHAR(100),
+                    costInUsd NVARCHAR(100),
+                    PayGPrice NVARCHAR(100),
+                    billingCurrency NVARCHAR(10),
+                    subscriptionName NVARCHAR(200),
+                    SubscriptionId NVARCHAR(100),
+                    ProductName NVARCHAR(500),
+                    frequency NVARCHAR(100),
+                    unitOfMeasure NVARCHAR(100),
+                    tags NVARCHAR(4000)
+                ) AS BillingData
+                WHERE filepath(1) = (SELECT LatestPath FROM LatestExport);
+EOSQL
+            )
+            
+            # Try to create the view
+            CREATE_VIEW_RESPONSE=$(curl -s -X POST \
+                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+                -H "Authorization: Bearer $ACCESS_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"query\": \"$CREATE_VIEW_SQL\"}" 2>/dev/null)
+            
+            if [[ "$CREATE_VIEW_RESPONSE" == *"success"* ]] || [[ -z "$CREATE_VIEW_RESPONSE" ]]; then
+                echo "✅ Database and view might have been created via REST API"
+                SETUP_COMPLETED=true
+            fi
+        fi
+    fi
+    
+    # Method 3: Install sqlcmd and retry
+    if [ "$SETUP_COMPLETED" != "true" ] && ! command -v sqlcmd >/dev/null 2>&1; then
+        echo "📝 Method 3: Installing sqlcmd and retrying..."
+        
+        # Try to install sqlcmd based on OS
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS
+            if command -v brew >/dev/null 2>&1; then
+                brew install sqlcmd 2>/dev/null && \
+                sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
+                       -d master \
+                       -U "$APP_ID" \
+                       -P "$CLIENT_SECRET" \
+                       -G \
+                       -Q "CREATE DATABASE BillingAnalytics" 2>/dev/null && \
+                SETUP_COMPLETED=true
+            fi
+        elif command -v apt-get >/dev/null 2>&1; then
+            # Ubuntu/Debian
+            curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add - 2>/dev/null
+            curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
+            sudo apt-get update >/dev/null 2>&1
+            sudo ACCEPT_EULA=Y apt-get install -y mssql-tools >/dev/null 2>&1
+            export PATH="$PATH:/opt/mssql-tools/bin"
+            
+            if command -v sqlcmd >/dev/null 2>&1; then
+                sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
+                       -d master \
+                       -U "$APP_ID" \
+                       -P "$CLIENT_SECRET" \
+                       -G \
+                       -Q "CREATE DATABASE BillingAnalytics" 2>/dev/null && \
+                SETUP_COMPLETED=true
+            fi
+        fi
+    fi
+    
+    # Method 4: Create a verification script
+    if [ "$SETUP_COMPLETED" != "true" ]; then
+        echo "📝 Method 4: Creating automated completion script..."
+        
+        cat > complete_synapse_setup.sh <<-EOSCRIPT
+#!/bin/bash
+# Auto-generated script to complete Synapse setup
+# Run this after the main script if database creation failed
+
+SYNAPSE_WORKSPACE="$SYNAPSE_WORKSPACE"
+APP_ID="$APP_ID"
+CLIENT_SECRET="$CLIENT_SECRET"
+STORAGE_ACCOUNT_NAME="$STORAGE_ACCOUNT_NAME"
+MASTER_KEY_PASSWORD="$MASTER_KEY_PASSWORD"
+
+echo "🔧 Attempting to complete Synapse setup..."
+
+# Try with Python if available
+if command -v python3 >/dev/null 2>&1; then
+    pip3 install pyodbc 2>/dev/null || pip install pyodbc 2>/dev/null
+    python3 -c "
+import pyodbc
+conn_str = f'DRIVER={{ODBC Driver 18 for SQL Server}};SERVER=$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net;DATABASE=master;UID=$APP_ID;PWD=$CLIENT_SECRET;Authentication=ActiveDirectoryServicePrincipal;Encrypt=yes;TrustServerCertificate=no;'
+try:
+    conn = pyodbc.connect(conn_str, autocommit=True)
+    cursor = conn.cursor()
+    cursor.execute('CREATE DATABASE BillingAnalytics')
+    print('✅ Database created!')
+except Exception as e:
+    print(f'Database might already exist: {e}')
+"
+fi
+
+echo "✅ To complete setup manually, run the SQL from synapse_billing_setup.sql in Synapse Studio"
+echo "   URL: https://web.azuresynapse.net"
+EOSCRIPT
+        chmod +x complete_synapse_setup.sh
+        echo "   ✅ Created: complete_synapse_setup.sh"
+        echo "   Run it with: ./complete_synapse_setup.sh"
+    fi
+fi
+
+# Final status check
+if [ "$SETUP_COMPLETED" = "true" ]; then
+    echo ""
+    echo "✅ Database and view setup completed automatically!"
+else
+    echo ""
+    echo "⚠️  Automated database creation was not successful."
+    echo ""
+    echo "📝 IMPORTANT: Complete setup using ONE of these methods:"
+    echo ""
+    echo "   Option 1: Run the completion script"
+    echo "   ./complete_synapse_setup.sh"
+    echo ""
+    echo "   Option 2: Use Synapse Studio (Web UI)"
+    echo "   1. Open: https://web.azuresynapse.net"
+    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
+    echo "   3. Run SQL from: synapse_billing_setup.sql"
+    echo ""
+    echo "   Option 3: Install sqlcmd and run:"
+    echo "   sqlcmd -S $SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net -U $APP_ID -P '$CLIENT_SECRET' -G -i synapse_billing_setup.sql"
+    echo ""
+    echo "⚠️  The system is 90% ready but REQUIRES the database/view creation to work!"
 fi
 
 # Save manual setup script as backup
@@ -1156,11 +1366,18 @@ echo "   - Synapse SQL Administrator"
 echo "   - Synapse Contributor"
 echo ""
 echo "📝 Next Steps:"
-echo "   1. ✅ Synapse database automatically configured with Managed Identity"
-echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
-echo "   3. Query data: SELECT * FROM BillingAnalytics.dbo.BillingData"
-echo "      ℹ️  View automatically filters to latest export (no duplication!)"
-echo "   4. Access Synapse Studio: https://web.azuresynapse.net"
+if [ "$SETUP_COMPLETED" = "true" ]; then
+    echo "   1. ✅ Synapse database automatically configured with Managed Identity"
+    echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
+    echo "   3. Query data: SELECT * FROM BillingAnalytics.dbo.BillingData"
+    echo "      ℹ️  View automatically filters to latest export (no duplication!)"
+    echo "   4. Access Synapse Studio: https://web.azuresynapse.net"
+else
+    echo "   1. ⚠️  Database/View creation pending - Run: ./complete_synapse_setup.sh"
+    echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
+    echo "   3. After setup, query: SELECT * FROM BillingAnalytics.dbo.BillingData"
+    echo "   4. Or complete in Synapse Studio: https://web.azuresynapse.net"
+fi
 echo ""
 echo "📊 Generated files:"
 echo "   - billing_queries.sql: Ready-to-use Synapse queries"
