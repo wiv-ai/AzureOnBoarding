@@ -148,8 +148,79 @@ echo ""
 echo "💰 Configuring Azure Cost Management Billing Export..."
 echo "--------------------------------------"
 
-# Use fixed resource group name
+# Ask if user wants to use existing billing export
+echo ""
+echo "🔹 Do you have an existing billing export you want to use?"
+echo "   (This could be from Azure Cost Management or another subscription)"
+read -p "Use existing billing export? (y/n): " USE_EXISTING_EXPORT
+
+if [[ "$USE_EXISTING_EXPORT" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "📝 Please provide the existing billing export details:"
+    
+    # Get storage account details
+    read -p "Storage Account Name (e.g., billingstorage12345): " EXISTING_STORAGE_ACCOUNT
+    read -p "Storage Account Resource Group: " EXISTING_STORAGE_RG
+    read -p "Storage Account Subscription ID (or press Enter for current): " EXISTING_STORAGE_SUB
+    
+    if [ -z "$EXISTING_STORAGE_SUB" ]; then
+        EXISTING_STORAGE_SUB=$(az account show --query id -o tsv)
+    fi
+    
+    read -p "Container Name (default: billing-exports): " EXISTING_CONTAINER
+    if [ -z "$EXISTING_CONTAINER" ]; then
+        EXISTING_CONTAINER="billing-exports"
+    fi
+    
+    read -p "Export folder path (e.g., billing-data or DailyExport): " EXISTING_EXPORT_PATH
+    if [ -z "$EXISTING_EXPORT_PATH" ]; then
+        EXISTING_EXPORT_PATH="billing-data"
+    fi
+    
+    # Verify the storage account exists and is accessible
+    echo ""
+    echo "🔍 Verifying storage account access..."
+    STORAGE_CHECK=$(az storage account show \
+        --name "$EXISTING_STORAGE_ACCOUNT" \
+        --resource-group "$EXISTING_STORAGE_RG" \
+        --subscription "$EXISTING_STORAGE_SUB" \
+        --query name -o tsv 2>/dev/null)
+    
+    if [ -n "$STORAGE_CHECK" ]; then
+        echo "✅ Storage account verified: $EXISTING_STORAGE_ACCOUNT"
+        STORAGE_ACCOUNT_NAME="$EXISTING_STORAGE_ACCOUNT"
+        STORAGE_RG="$EXISTING_STORAGE_RG"
+        STORAGE_SUBSCRIPTION="$EXISTING_STORAGE_SUB"
+        CONTAINER_NAME="$EXISTING_CONTAINER"
+        EXPORT_PATH="$EXISTING_EXPORT_PATH"
+        USE_EXISTING_STORAGE=true
+        
+        # Get storage account location for Synapse
+        AZURE_REGION=$(az storage account show \
+            --name "$STORAGE_ACCOUNT_NAME" \
+            --resource-group "$STORAGE_RG" \
+            --subscription "$STORAGE_SUBSCRIPTION" \
+            --query location -o tsv)
+        echo "   Storage location: $AZURE_REGION"
+    else
+        echo "❌ Could not access storage account. Please check:"
+        echo "   - Storage account name: $EXISTING_STORAGE_ACCOUNT"
+        echo "   - Resource group: $EXISTING_STORAGE_RG"
+        echo "   - Subscription: $EXISTING_STORAGE_SUB"
+        echo "   - You have Reader access to the storage account"
+        echo ""
+        echo "Falling back to creating new storage..."
+        USE_EXISTING_STORAGE=false
+    fi
+else
+    USE_EXISTING_STORAGE=false
+fi
+
+# Use fixed resource group name for Synapse resources
 BILLING_RG="wiv-rg"
+
+# Only create new storage if not using existing
+if [ "$USE_EXISTING_STORAGE" = "false" ]; then
 
 # Check if resource group exists and get its location
 echo "📁 Checking resource group '$BILLING_RG'..."
@@ -191,9 +262,29 @@ az storage container create \
     --account-key "$STORAGE_KEY" \
     --only-show-errors
 
-# Create daily billing export
+    # Set export path for new storage
+    EXPORT_PATH="billing-data"
+    STORAGE_SUBSCRIPTION=$(az account show --query id -o tsv)
+fi  # End of storage creation
+
+# Handle billing export creation
 EXPORT_NAME="DailyBillingExport"
-echo "📊 Creating daily billing export '$EXPORT_NAME'..."
+
+if [ "$USE_EXISTING_STORAGE" = "true" ] && [[ "$USE_EXISTING_EXPORT" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "✅ Using existing billing export configuration:"
+    echo "   Storage: $STORAGE_ACCOUNT_NAME"
+    echo "   Container: $CONTAINER_NAME"
+    echo "   Path: $EXPORT_PATH"
+    echo ""
+    echo "ℹ️  Note: Synapse will be configured to read from this existing export"
+    SKIP_EXPORT_CREATION=true
+else
+    echo "📊 Creating daily billing export '$EXPORT_NAME'..."
+    SKIP_EXPORT_CREATION=false
+fi
+
+if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
 
 # Get storage account resource ID
 STORAGE_RESOURCE_ID=$(az storage account show \
@@ -361,6 +452,8 @@ EXPORTJSON
 else
     echo "✅ Daily billing export configured successfully"
 fi
+
+fi  # End of SKIP_EXPORT_CREATION check
 
 # ===========================
 # SYNAPSE WORKSPACE SETUP
@@ -622,7 +715,8 @@ config = {
     'client_id': '$APP_ID',
     'client_secret': '$CLIENT_SECRET',
     'storage_account': '$STORAGE_ACCOUNT_NAME',
-    'container': '$CONTAINER_NAME',
+    'container_name': '$CONTAINER_NAME',
+    'export_path': '$EXPORT_PATH',
     'master_key_password': '$MASTER_KEY_PASSWORD'
 }
 
@@ -800,7 +894,7 @@ for retry in range(max_setup_retries):
             WITH LatestExport AS (
                 SELECT MAX(filepath(1)) as LatestPath
                 FROM OPENROWSET(
-                    BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                    BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv',
                     FORMAT = 'CSV',
                     PARSER_VERSION = '2.0',
                     FIRSTROW = 2
@@ -808,7 +902,7 @@ for retry in range(max_setup_retries):
             )
             SELECT *
             FROM OPENROWSET(
-                BULK 'abfss://billing-exports@{config['storage_account']}.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv',
                 FORMAT = 'CSV',
                 PARSER_VERSION = '2.0',
                 FIRSTROW = 2
@@ -1017,7 +1111,7 @@ if [ "$SETUP_COMPLETED" != "true" ]; then
                 WITH LatestExport AS (
                     SELECT MAX(filepath(1)) as LatestPath
                     FROM OPENROWSET(
-                        BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                        BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
                         FORMAT = 'CSV',
                         PARSER_VERSION = '2.0',
                         FIRSTROW = 2
@@ -1025,7 +1119,7 @@ if [ "$SETUP_COMPLETED" != "true" ]; then
                 )
                 SELECT *
                 FROM OPENROWSET(
-                    BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+                    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
                     FORMAT = 'CSV',
                     PARSER_VERSION = '2.0',
                     FIRSTROW = 2
@@ -1200,12 +1294,16 @@ GO
 -- Improved view that automatically queries only the latest export file
 -- This prevents data duplication since each export contains cumulative month-to-date data
 -- Using Managed Identity with abfss:// protocol (NEVER EXPIRES!)
+-- Storage Configuration:
+--   Account: $STORAGE_ACCOUNT_NAME
+--   Container: $CONTAINER_NAME
+--   Export Path: $EXPORT_PATH
 CREATE VIEW BillingData AS
 WITH LatestExport AS (
     -- Find the most recent export file
     SELECT MAX(filepath(1)) as LatestPath
     FROM OPENROWSET(
-        BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+        BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
         FORMAT = 'CSV',
         PARSER_VERSION = '2.0',
         FIRSTROW = 2
@@ -1213,7 +1311,7 @@ WITH LatestExport AS (
 )
 SELECT *
 FROM OPENROWSET(
-    BULK 'abfss://billing-exports@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/billing-data/DailyBillingExport/*/*.csv',
+    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     FIRSTROW = 2
@@ -1263,6 +1361,9 @@ SYNAPSE_CONFIG = {
     'database_name': 'BillingAnalytics',
     'storage_account': '$STORAGE_ACCOUNT_NAME',
     'container': '$CONTAINER_NAME',
+    'export_path': '$EXPORT_PATH',
+    'storage_subscription': '$STORAGE_SUBSCRIPTION',
+    'storage_resource_group': '$STORAGE_RG',
     'resource_group': '$BILLING_RG',
     'subscription_id': '$APP_SUBSCRIPTION_ID'
 }
@@ -1437,10 +1538,19 @@ echo "📄 App (Client) ID:          $APP_ID"
 echo "📄 Client Secret:            $CLIENT_SECRET"
 echo ""
 echo "💾 Storage Configuration:"
-echo "   - Resource Group:         $BILLING_RG"
+if [ "$USE_EXISTING_STORAGE" = "true" ]; then
+    echo "   - Using Existing Storage: YES"
+    echo "   - Storage Subscription:   $STORAGE_SUBSCRIPTION"
+    echo "   - Storage Resource Group: $STORAGE_RG"
+else
+    echo "   - Resource Group:         $BILLING_RG"
+fi
 echo "   - Storage Account:        $STORAGE_ACCOUNT_NAME"
 echo "   - Container:              $CONTAINER_NAME"
-echo "   - Export Name:            $EXPORT_NAME"
+echo "   - Export Path:            $EXPORT_PATH"
+if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
+    echo "   - Export Name:            $EXPORT_NAME"
+fi
 echo ""
 echo "🔷 Synapse Configuration:"
 echo "   - Workspace:              $SYNAPSE_WORKSPACE"
