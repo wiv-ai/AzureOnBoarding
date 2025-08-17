@@ -202,17 +202,28 @@ STORAGE_RESOURCE_ID=$(az storage account show \
     --query id -o tsv)
 
 # Create the export using REST API (as CLI doesn't have direct support)
-az rest --method PUT \
+# Handle date command differences between macOS and Linux
+if date --version >/dev/null 2>&1; then
+    # GNU date (Linux)
+    START_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    END_DATE=$(date -u -d '+5 years' +%Y-%m-%dT%H:%M:%SZ)
+else
+    # BSD date (macOS)
+    START_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    END_DATE=$(date -v +5y -u +%Y-%m-%dT%H:%M:%SZ)
+fi
+
+EXPORT_RESPONSE=$(az rest --method PUT \
     --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
-    --body @- <<EOF
+    --body @- <<EOF 2>&1
 {
   "properties": {
     "schedule": {
       "status": "Active",
       "recurrence": "Daily",
       "recurrencePeriod": {
-        "from": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-        "to": "$(date -u -d '+5 years' +%Y-%m-%dT%H:%M:%SZ)"
+        "from": "$START_DATE",
+        "to": "$END_DATE"
       }
     },
     "format": "Csv",
@@ -261,8 +272,27 @@ az rest --method PUT \
   }
 }
 EOF
+)
 
-echo "✅ Daily billing export configured successfully"
+# Check if export creation was successful
+if [[ "$EXPORT_RESPONSE" == *"error"* ]] || [[ "$EXPORT_RESPONSE" == *"BadRequest"* ]]; then
+    echo "⚠️  Warning: Billing export might already exist or had an issue"
+    echo "   This is often OK if the export was created in a previous run"
+    echo "   Details: ${EXPORT_RESPONSE:0:100}..."
+    
+    # Check if export already exists
+    EXISTING_EXPORT=$(az rest --method GET \
+        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
+        --query "name" -o tsv 2>/dev/null)
+    
+    if [ -n "$EXISTING_EXPORT" ]; then
+        echo "✅ Export '$EXPORT_NAME' already exists and is configured"
+    else
+        echo "⚠️  Export creation had issues but continuing with setup"
+    fi
+else
+    echo "✅ Daily billing export configured successfully"
+fi
 
 # ===========================
 # SYNAPSE WORKSPACE SETUP
