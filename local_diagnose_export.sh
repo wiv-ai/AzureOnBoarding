@@ -56,7 +56,12 @@ if [ "$EXPORT_EXISTS" = "false" ]; then
     echo ""
     echo "3️⃣ Creating billing export..."
     
-    # Create the export with fixed dates
+    # Get current date and future date
+    CURRENT_DATE=$(date +%Y-%m-%d)
+    FUTURE_YEAR=$(($(date +%Y) + 5))
+    FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
+    
+    # Create the export with dynamic dates
     cat > billing_export_fix.json <<EOF
 {
   "properties": {
@@ -64,8 +69,8 @@ if [ "$EXPORT_EXISTS" = "false" ]; then
       "status": "Active",
       "recurrence": "Daily",
       "recurrencePeriod": {
-        "from": "2024-01-01T00:00:00Z",
-        "to": "2029-12-31T00:00:00Z"
+        "from": "${CURRENT_DATE}T00:00:00Z",
+        "to": "${FUTURE_DATE}T00:00:00Z"
       }
     },
     "format": "Csv",
