@@ -96,7 +96,7 @@ if [ "$EXPORT_EXISTS" = "false" ]; then
             "PublisherType",
             "Quantity",
             "CostInBillingCurrency",
-            "CostInUsd",
+            "CostInUSD",
             "BillingCurrencyCode",
             "SubscriptionName",
             "SubscriptionId",

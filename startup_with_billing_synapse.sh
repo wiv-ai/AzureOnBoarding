@@ -255,7 +255,7 @@ EXPORT_RESPONSE=$(az rest --method PUT \
             "PublisherType",
             "Quantity",
             "CostInBillingCurrency",
-            "CostInUsd",
+            "CostInUSD",
             "BillingCurrencyCode",
             "SubscriptionName",
             "SubscriptionId",
