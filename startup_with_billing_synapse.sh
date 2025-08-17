@@ -202,16 +202,17 @@ STORAGE_RESOURCE_ID=$(az storage account show \
     --query id -o tsv)
 
 # Create the export using REST API (as CLI doesn't have direct support)
-# Handle date command differences between macOS and Linux
-if date --version >/dev/null 2>&1; then
-    # GNU date (Linux)
-    START_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    END_DATE=$(date -u -d '+5 years' +%Y-%m-%dT%H:%M:%SZ)
-else
-    # BSD date (macOS)
-    START_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    END_DATE=$(date -v +5y -u +%Y-%m-%dT%H:%M:%SZ)
-fi
+# Use portable date handling that works on both macOS and Linux
+echo "📅 Setting up billing export date range..."
+CURRENT_YEAR=$(date +%Y)
+CURRENT_MONTH=$(date +%m)
+CURRENT_DAY=$(date +%d)
+FUTURE_YEAR=$((CURRENT_YEAR + 5))
+
+START_DATE="${CURRENT_YEAR}-${CURRENT_MONTH}-${CURRENT_DAY}T00:00:00Z"
+END_DATE="${FUTURE_YEAR}-${CURRENT_MONTH}-${CURRENT_DAY}T00:00:00Z"
+
+echo "   Export period: $START_DATE to $END_DATE"
 
 EXPORT_RESPONSE=$(az rest --method PUT \
     --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
@@ -246,8 +247,6 @@ EXPORT_RESPONSE=$(az rest --method PUT \
             "MeterCategory",
             "MeterSubcategory",
             "MeterName",
-            "BillingAccountName",
-            "CostCenter",
             "ResourceGroup",
             "ResourceLocation",
             "ConsumedService",
@@ -256,8 +255,7 @@ EXPORT_RESPONSE=$(az rest --method PUT \
             "PublisherType",
             "Quantity",
             "CostInBillingCurrency",
-            "CostInUSD",
-            "PayGPrice",
+            "CostInUsd",
             "BillingCurrencyCode",
             "SubscriptionName",
             "SubscriptionId",
@@ -276,9 +274,7 @@ EOF
 
 # Check if export creation was successful
 if [[ "$EXPORT_RESPONSE" == *"error"* ]] || [[ "$EXPORT_RESPONSE" == *"BadRequest"* ]]; then
-    echo "⚠️  Warning: Billing export might already exist or had an issue"
-    echo "   This is often OK if the export was created in a previous run"
-    echo "   Details: ${EXPORT_RESPONSE:0:100}..."
+    echo "⚠️  Export creation failed. Checking if it already exists..."
     
     # Check if export already exists
     EXISTING_EXPORT=$(az rest --method GET \
@@ -286,9 +282,72 @@ if [[ "$EXPORT_RESPONSE" == *"error"* ]] || [[ "$EXPORT_RESPONSE" == *"BadReques
         --query "name" -o tsv 2>/dev/null)
     
     if [ -n "$EXISTING_EXPORT" ]; then
-        echo "✅ Export '$EXPORT_NAME' already exists and is configured"
+        echo "✅ Export '$EXPORT_NAME' already exists - no action needed"
     else
-        echo "⚠️  Export creation had issues but continuing with setup"
+        echo "🔧 Attempting to fix export creation..."
+        
+        # Try deleting and recreating with cleaner JSON
+        az rest --method DELETE \
+            --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
+            2>/dev/null
+        
+        sleep 2
+        
+        # Create export config file for cleaner JSON handling
+        cat > /tmp/export_config_$$.json <<EXPORTJSON
+{
+  "properties": {
+    "schedule": {
+      "status": "Active",
+      "recurrence": "Daily",
+      "recurrencePeriod": {
+        "from": "$START_DATE",
+        "to": "$END_DATE"
+      }
+    },
+    "format": "Csv",
+    "deliveryInfo": {
+      "destination": {
+        "resourceId": "$STORAGE_RESOURCE_ID",
+        "container": "$CONTAINER_NAME",
+        "rootFolderPath": "billing-data"
+      }
+    },
+    "definition": {
+      "type": "ActualCost",
+      "timeframe": "MonthToDate",
+      "dataSet": {
+        "granularity": "Daily",
+        "configuration": {
+          "columns": [
+            "Date", "ServiceFamily", "MeterCategory", "MeterSubcategory",
+            "MeterName", "ResourceGroup", "ResourceLocation", "ConsumedService",
+            "ResourceId", "ChargeType", "PublisherType", "Quantity",
+            "CostInBillingCurrency", "CostInUsd", "BillingCurrencyCode",
+            "SubscriptionName", "SubscriptionId", "ProductName",
+            "Frequency", "UnitOfMeasure", "Tags"
+          ]
+        }
+      }
+    }
+  }
+}
+EXPORTJSON
+        
+        # Retry with JSON file
+        RETRY_RESPONSE=$(az rest --method PUT \
+            --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
+            --body @/tmp/export_config_$$.json 2>&1)
+        
+        rm -f /tmp/export_config_$$.json
+        
+        if [[ "$RETRY_RESPONSE" == *"error"* ]]; then
+            echo "⚠️  Could not create billing export automatically"
+            echo "   You can create it manually in Azure Portal > Cost Management > Exports"
+            echo "   This won't affect Synapse functionality"
+        else
+            echo "✅ Daily billing export configured successfully on retry!"
+        fi
     fi
 else
     echo "✅ Daily billing export configured successfully"
