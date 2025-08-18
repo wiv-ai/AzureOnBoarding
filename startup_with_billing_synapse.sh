@@ -444,7 +444,10 @@ echo "🔷 Setting up Azure Synapse Analytics Workspace..."
 echo "--------------------------------------"
 
 # Use fixed Synapse workspace name
-SYNAPSE_WORKSPACE="wiv-synapse-billing"
+# Generate unique suffix for Synapse workspace name
+UNIQUE_SUFFIX=$(date +%s | tail -c 6)
+SYNAPSE_WORKSPACE="wiv-synapse-billing-${UNIQUE_SUFFIX}"
+echo "📝 Synapse workspace name: $SYNAPSE_WORKSPACE"
 
 # Check if Synapse workspace already exists
 echo "🔍 Checking if Synapse workspace '$SYNAPSE_WORKSPACE' exists..."
