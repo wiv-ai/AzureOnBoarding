@@ -112,13 +112,12 @@ az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" -
 echo "  - Assigning Monitoring Reader..."
 az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-# Assign Storage Blob Data Contributor role for billing exports
-echo "  - Assigning Storage Blob Data Contributor..."
-az role assignment create --assignee "$APP_ID" --role "Storage Blob Data Contributor" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
+# Assign Storage Blob Data Reader role for billing exports (read-only access)
+echo "  - Assigning Storage Blob Data Reader..."
+az role assignment create --assignee "$APP_ID" --role "Storage Blob Data Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-# Assign Contributor role for Synapse workspace management
-echo "  - Assigning Contributor role for Synapse management..."
-az role assignment create --assignee "$APP_ID" --role "Contributor" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
+# Note: Synapse-specific roles will be assigned at the workspace level after creation
+# This follows the principle of least privilege
 
 echo "  ✅ Done with subscription: $APP_SUBSCRIPTION_ID"
 
