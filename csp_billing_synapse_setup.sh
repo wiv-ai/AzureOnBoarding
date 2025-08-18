@@ -22,14 +22,101 @@ echo -e "${BLUE}================================================================
 echo ""
 
 # ===========================
-# STEP 1: LOGIN & DISCOVERY
+# STEP 1: LOGIN & SERVICE PRINCIPAL
 # ===========================
-echo -e "${YELLOW}Step 1: Authentication and CSP Billing Account Discovery${NC}"
+echo -e "${YELLOW}Step 1: Authentication and Service Principal Setup${NC}"
 echo "--------------------------------------"
 
 # Login to Azure
 echo "🔐 Logging into Azure..."
 az login --output none
+
+# Get Tenant ID
+TENANT_ID=$(az account show --query tenantId -o tsv)
+echo "Tenant ID: $TENANT_ID"
+
+# Service Principal Setup
+APP_DISPLAY_NAME="wiv_csp_billing"
+echo ""
+echo "🔐 Checking for service principal '$APP_DISPLAY_NAME'..."
+APP_ID=$(az ad sp list --display-name "$APP_DISPLAY_NAME" --query "[0].appId" -o tsv 2>/dev/null)
+
+if [ -z "$APP_ID" ]; then
+  echo "🔧 Creating new App Registration..."
+  APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --query appId -o tsv)
+  az ad sp create --id "$APP_ID" > /dev/null
+  echo "✅ Service principal created. App ID: $APP_ID"
+  
+  # Create client secret for new app
+  echo ""
+  echo "🔑 Creating client secret..."
+  if date --version >/dev/null 2>&1; then
+      END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+  else
+      END_DATE=$(date -v +2y +"%Y-%m-%d")
+  fi
+  CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
+  echo "✅ Client secret created successfully"
+  echo ""
+  echo "⚠️  IMPORTANT: Save these credentials NOW! The secret cannot be retrieved later:"
+  echo "   Tenant ID: $TENANT_ID"
+  echo "   Client ID (App ID): $APP_ID"
+  echo "   Client Secret: $CLIENT_SECRET"
+  echo ""
+  read -p "Press Enter once you've saved the credentials..."
+else
+  echo "✅ Service principal already exists. App ID: $APP_ID"
+  echo "⏭️  Skipping app creation..."
+  
+  # Prompt for the existing client secret or create new one
+  echo ""
+  echo "⚠️  IMPORTANT: The service principal already exists."
+  echo "   You need a client secret to continue."
+  echo ""
+  echo "   Options:"
+  echo "   1. Enter existing client secret (if you have it)"
+  echo "   2. Generate a new client secret (will invalidate old ones)"
+  echo "   3. Cancel (Ctrl+C)"
+  echo ""
+  
+  read -p "Do you want to generate a NEW client secret? (y/n): " GENERATE_NEW
+  
+  if [[ "$GENERATE_NEW" =~ ^[Yy]$ ]]; then
+    echo "🔑 Generating new client secret..."
+    if date --version >/dev/null 2>&1; then
+        END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+    else
+        END_DATE=$(date -v +2y +"%Y-%m-%d")
+    fi
+    CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
+    echo "✅ New client secret generated successfully"
+    echo ""
+    echo "⚠️  IMPORTANT: Save this secret NOW! It cannot be retrieved later:"
+    echo "   $CLIENT_SECRET"
+    echo ""
+    read -p "Press Enter once you've saved the secret..."
+  else
+    # Read existing client secret securely (hidden input)
+    read -s -p "🔑 Enter the existing client secret: " CLIENT_SECRET
+    echo "" # New line after hidden input
+    
+    # Validate that a secret was provided
+    if [ -z "$CLIENT_SECRET" ]; then
+      echo ""
+      echo "❌ Error: Client secret is required to continue"
+      echo ""
+      echo "To create a new secret manually:"
+      echo "  1. Go to Azure Portal > Azure Active Directory > App registrations"
+      echo "  2. Find '$APP_DISPLAY_NAME' (App ID: $APP_ID)"
+      echo "  3. Go to 'Certificates & secrets' > 'Client secrets'"
+      echo "  4. Click 'New client secret' and save the value"
+      echo ""
+      exit 1
+    fi
+    
+    echo "✅ Client secret provided"
+  fi
+fi
 
 # ===========================
 # DISCOVER CSP BILLING ACCOUNT
