@@ -573,29 +573,9 @@ SYNAPSE_RESOURCE_ID=$(az synapse workspace show \
     --resource-group "$BILLING_RG" \
     --query id -o tsv)
 
-# Assign Synapse Administrator role to the service principal
-echo "👤 Assigning Synapse Administrator role..."
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse Administrator" \
-    --assignee-object-id "$SP_OBJECT_ID" \
-    --only-show-errors
-
-# Assign Synapse SQL Administrator role
-echo "🗄️ Assigning Synapse SQL Administrator role..."
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse SQL Administrator" \
-    --assignee-object-id "$SP_OBJECT_ID" \
-    --only-show-errors
-
-# Assign Synapse Contributor role
-echo "✏️ Assigning Synapse Contributor role..."
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse Contributor" \
-    --assignee-object-id "$SP_OBJECT_ID" \
-    --only-show-errors
+# Note: The service principal that creates the workspace automatically has access
+# No additional Synapse roles needed for querying billing data
+echo "✅ Service principal has implicit access as workspace creator"
 
 # Configure Managed Identity authentication (NO TOKENS NEEDED!)
 echo ""
