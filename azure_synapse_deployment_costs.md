@@ -317,7 +317,7 @@ To monitor these costs:
 ```bash
 # Create a budget alert for Synapse
 az consumption budget create \
-  --resource-group wiv-rg \
+  --resource-group rg-wiv \
   --name SynapseBudget \
   --amount 10 \
   --time-grain Monthly \
