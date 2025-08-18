@@ -100,26 +100,15 @@ else
   fi
 fi
 
-# Assign roles to the current subscription only
+# Initial minimal permissions
 echo ""
-echo "🔒 Assigning roles to subscription: $APP_SUBSCRIPTION_ID"
+echo "🔒 Setting up initial permissions..."
 
-# Assign Cost Management Reader role
-echo "  - Assigning Cost Management Reader..."
+# Only Cost Management Reader needs subscription-level access (for billing data)
+echo "  - Assigning Cost Management Reader at subscription level..."
 az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-# Assign Monitoring Reader role
-echo "  - Assigning Monitoring Reader..."
-az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
-
-# Assign Storage Blob Data Reader role for billing exports (read-only access)
-echo "  - Assigning Storage Blob Data Reader..."
-az role assignment create --assignee "$APP_ID" --role "Storage Blob Data Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
-
-# Note: Synapse-specific roles will be assigned at the workspace level after creation
-# This follows the principle of least privilege
-
-echo "  ✅ Done with subscription: $APP_SUBSCRIPTION_ID"
+echo "  ✅ Initial permissions set. Resource-specific permissions will be assigned after resource creation."
 
 # ===========================
 # BILLING EXPORT CONFIGURATION
@@ -226,6 +215,20 @@ az storage account create \
     --location "$AZURE_REGION" \
     --sku Standard_LRS \
     --kind StorageV2 \
+    --only-show-errors
+
+# Get storage account resource ID for permissions
+STORAGE_RESOURCE_ID=$(az storage account show \
+    --name "$STORAGE_ACCOUNT_NAME" \
+    --resource-group "$BILLING_RG" \
+    --query id -o tsv)
+
+# Assign Storage Blob Data Reader permission on this specific storage account
+echo "🔐 Assigning Storage Blob Data Reader on storage account..."
+az role assignment create \
+    --assignee "$APP_ID" \
+    --role "Storage Blob Data Reader" \
+    --scope "$STORAGE_RESOURCE_ID" \
     --only-show-errors
 
 # Create container for billing exports
@@ -475,6 +478,20 @@ else
         --hierarchical-namespace true \
         --only-show-errors
 
+    # Get Data Lake storage resource ID for permissions
+    DATALAKE_RESOURCE_ID=$(az storage account show \
+        --name "$SYNAPSE_STORAGE" \
+        --resource-group "$BILLING_RG" \
+        --query id -o tsv)
+    
+    # Assign Storage Blob Data Contributor on Data Lake (Synapse needs write access)
+    echo "🔐 Assigning Storage Blob Data Contributor on Data Lake storage..."
+    az role assignment create \
+        --assignee "$APP_ID" \
+        --role "Storage Blob Data Contributor" \
+        --scope "$DATALAKE_RESOURCE_ID" \
+        --only-show-errors
+    
     # Create filesystem for Synapse
     FILESYSTEM_NAME="synapsefilesystem"
     echo "📂 Creating filesystem '$FILESYSTEM_NAME'..."
@@ -503,6 +520,20 @@ fi
 # Wait for workspace to be created
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
+
+# Get Synapse workspace resource ID
+SYNAPSE_RESOURCE_ID=$(az synapse workspace show \
+    --name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" \
+    --query id -o tsv)
+
+# Assign Contributor permission on the Synapse workspace only
+echo "🔐 Assigning Contributor permission on Synapse workspace..."
+az role assignment create \
+    --assignee "$APP_ID" \
+    --role "Contributor" \
+    --scope "$SYNAPSE_RESOURCE_ID" \
+    --only-show-errors
 
 echo "⏳ Waiting for Synapse workspace to be fully operational..."
 sleep 30
