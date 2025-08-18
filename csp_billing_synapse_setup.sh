@@ -36,7 +36,7 @@ TENANT_ID=$(az account show --query tenantId -o tsv)
 echo "Tenant ID: $TENANT_ID"
 
 # Service Principal Setup
-APP_DISPLAY_NAME="wiv_csp_billing"
+APP_DISPLAY_NAME="wiv_account"
 echo ""
 echo "🔐 Checking for service principal '$APP_DISPLAY_NAME'..."
 APP_ID=$(az ad sp list --display-name "$APP_DISPLAY_NAME" --query "[0].appId" -o tsv 2>/dev/null)
