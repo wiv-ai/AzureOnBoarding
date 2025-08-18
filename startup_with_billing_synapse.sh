@@ -100,46 +100,27 @@ else
   fi
 fi
 
-# Assign roles to all subscriptions
+# Assign roles to the current subscription only
 echo ""
-echo "🔒 Do you want to assign roles to all subscriptions or only specific ones? (all/specific): "
-read SCOPE_CHOICE
+echo "🔒 Assigning roles to subscription: $APP_SUBSCRIPTION_ID"
 
-if [[ "$SCOPE_CHOICE" =~ ^[Aa]ll$ ]]; then
-  echo "🔒 Assigning roles to all subscriptions..."
-  SUBSCRIPTIONS_TO_PROCESS=$(az account list --query '[].id' -o tsv)
-else
-  echo "🔒 Enter comma-separated list of subscription IDs to assign roles to (or press Enter to use the same subscription): "
-  read SPECIFIC_SUBSCRIPTIONS
+# Assign Cost Management Reader role
+echo "  - Assigning Cost Management Reader..."
+az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-  if [ -z "$SPECIFIC_SUBSCRIPTIONS" ]; then
-    SUBSCRIPTIONS_TO_PROCESS="$APP_SUBSCRIPTION_ID"
-  else
-    SUBSCRIPTIONS_TO_PROCESS=$(echo $SPECIFIC_SUBSCRIPTIONS | tr ',' ' ')
-  fi
-fi
+# Assign Monitoring Reader role
+echo "  - Assigning Monitoring Reader..."
+az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-for SUBSCRIPTION_ID in $SUBSCRIPTIONS_TO_PROCESS; do
-  echo "Processing subscription: $SUBSCRIPTION_ID"
+# Assign Storage Blob Data Contributor role for billing exports
+echo "  - Assigning Storage Blob Data Contributor..."
+az role assignment create --assignee "$APP_ID" --role "Storage Blob Data Contributor" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-  # Assign Cost Management Reader role
-  echo "  - Assigning Cost Management Reader..."
-  az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$SUBSCRIPTION_ID" --only-show-errors
+# Assign Contributor role for Synapse workspace management
+echo "  - Assigning Contributor role for Synapse management..."
+az role assignment create --assignee "$APP_ID" --role "Contributor" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-  # Assign Monitoring Reader role
-  echo "  - Assigning Monitoring Reader..."
-  az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$SUBSCRIPTION_ID" --only-show-errors
-
-  # Assign Storage Blob Data Contributor role for billing exports
-  echo "  - Assigning Storage Blob Data Contributor..."
-  az role assignment create --assignee "$APP_ID" --role "Storage Blob Data Contributor" --scope "/subscriptions/$SUBSCRIPTION_ID" --only-show-errors
-
-  # Assign Contributor role for Synapse workspace management
-  echo "  - Assigning Contributor role for Synapse management..."
-  az role assignment create --assignee "$APP_ID" --role "Contributor" --scope "/subscriptions/$SUBSCRIPTION_ID" --only-show-errors
-
-  echo "  ✅ Done with subscription: $SUBSCRIPTION_ID"
-done
+echo "  ✅ Done with subscription: $APP_SUBSCRIPTION_ID"
 
 # ===========================
 # BILLING EXPORT CONFIGURATION
