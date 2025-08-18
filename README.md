@@ -67,6 +67,7 @@ The script will:
 - Verify access to existing storage
 - Configure Synapse to read from your existing exports
 - Skip creating duplicate billing exports
+- Create resources in resource group `rg-wiv`
 
 ## 🏗️ Architecture
 

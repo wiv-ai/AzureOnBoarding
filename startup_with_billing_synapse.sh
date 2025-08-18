@@ -217,7 +217,7 @@ else
 fi
 
 # Use fixed resource group name for Synapse resources
-BILLING_RG="wiv-rg"
+BILLING_RG="rg-wiv"
 
 # Only create new storage if not using existing
 if [ "$USE_EXISTING_STORAGE" = "false" ]; then
