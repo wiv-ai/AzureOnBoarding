@@ -1,0 +1,21 @@
+# Assign roles to the current subscription only
+echo ""
+echo "🔒 Assigning roles to subscription: $APP_SUBSCRIPTION_ID"
+
+# Assign Cost Management Reader role
+echo "  - Assigning Cost Management Reader..."
+az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
+
+# Assign Monitoring Reader role
+echo "  - Assigning Monitoring Reader..."
+az role assignment create --assignee "$APP_ID" --role "Monitoring Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
+
+# Assign Storage Blob Data Contributor role for billing exports
+echo "  - Assigning Storage Blob Data Contributor..."
+az role assignment create --assignee "$APP_ID" --role "Storage Blob Data Contributor" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
+
+# Assign Contributor role for Synapse workspace management
+echo "  - Assigning Contributor role for Synapse management..."
+az role assignment create --assignee "$APP_ID" --role "Contributor" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
+
+echo "  ✅ Done with subscription: $APP_SUBSCRIPTION_ID"
