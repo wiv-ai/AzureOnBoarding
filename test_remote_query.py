@@ -26,10 +26,10 @@ try:
 except ImportError:
     # Use the test configuration
     config = {
-        'tenant_id': 'ba153ff0-3397-4ef5-a214-dd33e8c37bff',
-        'client_id': '554b11c1-18f9-46b5-a096-30e0a2cfae6f',
-        'client_secret': 'tmC8Q~xjjkGx9MD2mPY5OeUh.HcbeqlReT6C7ams',
-        'workspace_name': 'wiv-synapse-billing',
+        'tenant_id': 'YOUR_TENANT_ID',
+        'client_id': 'YOUR_CLIENT_ID',
+        'client_secret': 'YOUR_CLIENT_SECRET',  # DO NOT COMMIT REAL SECRETS!
+        'workspace_name': 'YOUR_WORKSPACE_NAME',
         'database_name': 'BillingAnalytics'
     }
     print("⚠️  Using default test configuration")
