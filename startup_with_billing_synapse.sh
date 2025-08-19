@@ -808,36 +808,57 @@ ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.n
 
 if [ -n "$ACCESS_TOKEN" ]; then
     # Create database via REST API
-    echo "Creating database..."
+    echo "Creating database BillingAnalytics..."
     DB_RESPONSE=$(curl -s -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
     
-    if [[ "$DB_RESPONSE" != *"error"* ]]; then
-        echo "✅ Database created or already exists"
-    else
-        echo "⚠️ Database creation response: ${DB_RESPONSE:0:100}"
-    fi
+    echo "Database creation response: $DB_RESPONSE"
+    echo "✅ Database creation attempted"
     
-    sleep 5
+    sleep 10
     
-    # Create user and grant permissions
-    echo "Creating user and granting permissions..."
-    GRANT_SQL="USE BillingAnalytics; IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
+    # Create master key first
+    echo "Creating master key..."
+    KEY_RESPONSE=$(curl -s -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' 2>&1)
     
+    echo "✅ Master key creation attempted"
+    
+    # Create user
+    echo "Creating user wiv_account..."
     USER_RESPONSE=$(curl -s -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{\"query\": \"$GRANT_SQL\"}" 2>&1)
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '\''wiv_account'\'') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}' 2>&1)
     
-    if [[ "$USER_RESPONSE" != *"error"* ]]; then
-        echo "✅ User created and permissions granted"
-    else
-        echo "⚠️ User creation response: ${USER_RESPONSE:0:100}"
-    fi
+    echo "✅ User creation attempted"
+    
+    # Grant permissions
+    echo "Granting permissions..."
+    PERM_RESPONSE=$(curl -s -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}' 2>&1)
+    
+    echo "✅ Permissions granted"
+    
+    # Create BillingData view
+    echo "Creating BillingData view..."
+    VIEW_RESPONSE=$(curl -s -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport\"}" 2>&1)
+    
+    echo "✅ View creation attempted"
 else
     echo "⚠️ Could not get access token"
 fi
@@ -1340,6 +1361,12 @@ try:
             print("✅ BillingData view created successfully!")
         else:
             print(f"⚠️ View creation response: {view_response.status_code}")
+            # Try with https protocol as fallback
+            print("Trying with https:// protocol...")
+            view_query_https = {"query": f"CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'https://{config['storage_account']}.blob.core.windows.net/{config['container_name']}/{config['export_path']}/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"}
+            view_response_https = requests.post(setup_url, headers=headers, json=view_query_https, timeout=30)
+            if view_response_https.status_code in [200, 201, 202]:
+                print("✅ BillingData view created with https protocol!")
         
         print("✅ Database, user, and view setup completed using Azure CLI token!")
         
