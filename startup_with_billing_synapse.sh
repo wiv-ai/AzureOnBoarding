@@ -698,6 +698,23 @@ fi
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
+# Grant the service principal Synapse roles immediately
+echo "🔐 Granting Synapse workspace roles to service principal..."
+az synapse role assignment create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --role "Synapse Administrator" \
+    --assignee "$APP_ID" \
+    --only-show-errors 2>/dev/null || echo "  Synapse Administrator role may already exist"
+
+az synapse role assignment create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --role "Synapse SQL Administrator" \
+    --assignee "$APP_ID" \
+    --only-show-errors 2>/dev/null || echo "  Synapse SQL Administrator role may already exist"
+
+# Wait for role assignments to propagate
+sleep 10
+
 # Create database and grant permissions using Azure CLI
 echo ""
 echo "🔧 Creating BillingAnalytics database and configuring permissions..."
@@ -746,34 +763,140 @@ echo "$SQL_SCRIPT" > /tmp/create_db_user_$$.sql
 # Execute using Azure Data Studio CLI or Synapse Studio REST API
 echo "Executing database setup..."
 
-# Get access token for current Azure user
-ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
+# Method 1: Try using az synapse sql-script command
+echo "Method 1: Using Azure CLI Synapse commands..."
+
+# Create a SQL script in Synapse workspace
+SCRIPT_NAME="SetupDatabase_$(date +%s)"
+cat > /tmp/setup_db_$$.sql <<'SETUPSQL'
+-- Create database
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
+    CREATE DATABASE BillingAnalytics;
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Create master key
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';
+GO
+
+-- Create user for service principal
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
+    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
+GO
+
+-- Grant permissions
+ALTER ROLE db_datareader ADD MEMBER [wiv_account];
+ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
+ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
+GO
+SETUPSQL
+
+# Create and execute the SQL script
+az synapse sql-script create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --name "$SCRIPT_NAME" \
+    --file /tmp/setup_db_$$.sql \
+    --resource-group "$BILLING_RG" \
+    --only-show-errors 2>/dev/null && echo "✅ SQL script created in Synapse"
+
+# Method 2: Use REST API with better error handling
+echo "Method 2: Using REST API with Azure user token..."
+ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
 
 if [ -n "$ACCESS_TOKEN" ]; then
     # Create database via REST API
-    curl -X POST \
+    echo "Creating database..."
+    DB_RESPONSE=$(curl -s -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' \
-        --silent --output /dev/null 2>&1
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
+    
+    if [[ "$DB_RESPONSE" != *"error"* ]]; then
+        echo "✅ Database created or already exists"
+    else
+        echo "⚠️ Database creation response: ${DB_RESPONSE:0:100}"
+    fi
     
     sleep 5
     
     # Create user and grant permissions
+    echo "Creating user and granting permissions..."
     GRANT_SQL="USE BillingAnalytics; IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
     
-    curl -X POST \
+    USER_RESPONSE=$(curl -s -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{\"query\": \"$GRANT_SQL\"}" \
-        --silent --output /dev/null 2>&1
+        -d "{\"query\": \"$GRANT_SQL\"}" 2>&1)
     
-    echo "✅ Database and user setup completed via REST API"
+    if [[ "$USER_RESPONSE" != *"error"* ]]; then
+        echo "✅ User created and permissions granted"
+    else
+        echo "⚠️ User creation response: ${USER_RESPONSE:0:100}"
+    fi
 else
-    echo "⚠️ Could not get access token, will try alternative method"
+    echo "⚠️ Could not get access token"
 fi
+
+# Method 3: Use Azure CLI with service principal context
+echo "Method 3: Granting Synapse Administrator role to service principal..."
+az synapse role assignment create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --role "Synapse Administrator" \
+    --assignee "$APP_ID" \
+    --only-show-errors 2>/dev/null && echo "✅ Synapse Administrator role granted"
+
+az synapse role assignment create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --role "Synapse SQL Administrator" \
+    --assignee "$APP_ID" \
+    --only-show-errors 2>/dev/null && echo "✅ Synapse SQL Administrator role granted"
+
+# Clean up
+rm -f /tmp/setup_db_$$.sql
+
+# Method 4: Create a Synapse pipeline to execute SQL
+echo "Method 4: Creating Synapse pipeline to execute SQL..."
+PIPELINE_NAME="SetupDatabasePipeline_$(date +%s)"
+
+# Create a pipeline definition
+cat > /tmp/pipeline_$$.json <<'PIPELINEJSON'
+{
+  "name": "SetupDatabasePipeline",
+  "properties": {
+    "activities": [
+      {
+        "name": "CreateDatabase",
+        "type": "SqlServerStoredProcedure",
+        "typeProperties": {
+          "storedProcedureName": "sp_executesql",
+          "storedProcedureParameters": {
+            "stmt": {
+              "value": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics",
+              "type": "String"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+PIPELINEJSON
+
+az synapse pipeline create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --name "$PIPELINE_NAME" \
+    --file /tmp/pipeline_$$.json \
+    --resource-group "$BILLING_RG" \
+    --only-show-errors 2>/dev/null && echo "✅ Pipeline created"
+
+rm -f /tmp/pipeline_$$.json
+
+echo "✅ Database setup attempted with multiple methods"
 
 # Clean up
 rm -f /tmp/create_db_user_$$.sql
