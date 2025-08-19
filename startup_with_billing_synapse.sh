@@ -719,15 +719,57 @@ sleep 10
 echo ""
 echo "🔧 Creating BillingAnalytics database and configuring permissions..."
 
-# Use Azure CLI to run SQL commands directly
-echo "Creating database and user with Azure CLI..."
+# Direct REST API approach optimized for Cloud Shell
+echo "Setting up database using REST API (optimized for Cloud Shell)..."
 
-# Create database first
-az synapse sql pool list \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" &>/dev/null
+# Get token - Cloud Shell is already authenticated
+ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
 
-# Execute SQL to create database and user using Azure user's context
+if [ -n "$ACCESS_TOKEN" ]; then
+    echo "✅ Got access token"
+    
+    # Create database
+    echo -n "Creating database BillingAnalytics... "
+    curl -s -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' \
+        -o /dev/null && echo "✅" || echo "⚠️"
+    
+    sleep 10
+    
+    # Create user and permissions in one call
+    echo -n "Creating user wiv_account and permissions... "
+    SETUP_SQL="IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd!'; IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"
+    
+    curl -s -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"$SETUP_SQL\"}" \
+        -o /dev/null && echo "✅" || echo "⚠️"
+    
+    sleep 5
+    
+    # Create BillingData view
+    echo -n "Creating BillingData view... "
+    VIEW_SQL="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
+    
+    curl -s -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"$VIEW_SQL\"}" \
+        -o /dev/null && echo "✅" || echo "⚠️"
+    
+    echo "✅ Database setup completed via REST API"
+else
+    echo "⚠️ Could not get access token. Falling back to other methods..."
+fi
+
+# Continue with fallback methods
+echo "Executing additional setup methods..."
 SQL_SCRIPT="
 -- Create database if not exists
 IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
@@ -802,68 +844,7 @@ az synapse sql-script create \
     --resource-group "$BILLING_RG" \
     --only-show-errors 2>/dev/null && echo "✅ SQL script created in Synapse"
 
-# Method 2: Use REST API with better error handling
-echo "Method 2: Using REST API with Azure user token..."
-# In Cloud Shell, refresh token if needed
-az account get-access-token --resource https://database.windows.net --query accessToken -o tsv >/dev/null 2>&1 || az login --only-show-errors >/dev/null 2>&1
-ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
-
-if [ -n "$ACCESS_TOKEN" ]; then
-    # Create database via REST API
-    echo "Creating database BillingAnalytics..."
-    DB_RESPONSE=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
-    
-    echo "Database creation response: $DB_RESPONSE"
-    echo "✅ Database creation attempted"
-    
-    sleep 10
-    
-    # Create master key first
-    echo "Creating master key..."
-    KEY_RESPONSE=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' 2>&1)
-    
-    echo "✅ Master key creation attempted"
-    
-    # Create user
-    echo "Creating user wiv_account..."
-    USER_RESPONSE=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '\''wiv_account'\'') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}' 2>&1)
-    
-    echo "✅ User creation attempted"
-    
-    # Grant permissions
-    echo "Granting permissions..."
-    PERM_RESPONSE=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}' 2>&1)
-    
-    echo "✅ Permissions granted"
-    
-    # Create BillingData view
-    echo "Creating BillingData view..."
-    VIEW_RESPONSE=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": \"CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport\"}" 2>&1)
-    
-    echo "✅ View creation attempted"
-else
-    echo "⚠️ Could not get access token"
-fi
+# Method 2 already handled above, skip duplicate
 
 # Method 3: Use Azure CLI with service principal context
 echo "Method 3: Granting Synapse Administrator role to service principal..."
