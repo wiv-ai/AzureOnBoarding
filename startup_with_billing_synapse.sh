@@ -1335,25 +1335,25 @@ for retry in range(max_setup_retries):
             else:
                 print(f"⚠️ Master key: {str(e)[:100]}")
         
-        # Create database user for the service principal
+        # Create database user for the service principal (using wiv_account name)
         try:
-            cursor.execute(f"CREATE USER [{config['client_id']}] FROM EXTERNAL PROVIDER")
-            print(f"✅ Database user created for service principal {config['client_id']}")
+            cursor.execute("CREATE USER [wiv_account] FROM EXTERNAL PROVIDER")
+            print("✅ Database user 'wiv_account' created for service principal")
         except pyodbc.Error as e:
             if "already exists" in str(e):
-                print(f"✅ Database user already exists for {config['client_id']}")
+                print("✅ Database user 'wiv_account' already exists")
             else:
                 print(f"⚠️ Database user creation: {str(e)[:100]}")
         
         # Grant necessary permissions to the service principal
         try:
-            cursor.execute(f"ALTER ROLE db_datareader ADD MEMBER [{config['client_id']}]")
-            cursor.execute(f"ALTER ROLE db_datawriter ADD MEMBER [{config['client_id']}]")
-            cursor.execute(f"ALTER ROLE db_ddladmin ADD MEMBER [{config['client_id']}]")
-            print("✅ Database permissions granted to service principal")
+            cursor.execute("ALTER ROLE db_datareader ADD MEMBER [wiv_account]")
+            cursor.execute("ALTER ROLE db_datawriter ADD MEMBER [wiv_account]")
+            cursor.execute("ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]")
+            print("✅ Database permissions granted to wiv_account")
         except pyodbc.Error as e:
             if "already a member" in str(e):
-                print("✅ Service principal already has database permissions")
+                print("✅ wiv_account already has database permissions")
             else:
                 print(f"⚠️ Permission grant: {str(e)[:100]}")
         
