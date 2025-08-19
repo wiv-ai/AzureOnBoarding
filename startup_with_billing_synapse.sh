@@ -1331,7 +1331,17 @@ try:
         if grant_response.status_code in [200, 201, 202]:
             print("✅ Permissions granted to 'wiv_account'")
         
-        print("✅ Database and user setup completed using Azure CLI token!")
+        # Create the BillingData view
+        print("Creating BillingData view...")
+        view_query = {"query": f"CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"}
+        view_response = requests.post(setup_url, headers=headers, json=view_query, timeout=30)
+        
+        if view_response.status_code in [200, 201, 202]:
+            print("✅ BillingData view created successfully!")
+        else:
+            print(f"⚠️ View creation response: {view_response.status_code}")
+        
+        print("✅ Database, user, and view setup completed using Azure CLI token!")
         
     else:
         print("⚠️ Could not get Azure user token")
