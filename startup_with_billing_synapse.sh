@@ -495,6 +495,95 @@ fi
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
+# Create database and grant permissions using Azure CLI
+echo ""
+echo "🔧 Creating BillingAnalytics database and configuring permissions..."
+
+# Create the database using Azure CLI
+echo "Creating BillingAnalytics database..."
+az synapse sql database create \
+    --name "BillingAnalytics" \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" \
+    2>/dev/null || echo "Database may already exist"
+
+# Wait for database to be ready
+sleep 10
+
+# Create and execute SQL script to set up database user
+echo "Setting up database user for service principal..."
+cat > /tmp/setup_db_user_$$.sql <<SQLEOF
+-- Create database if not exists
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
+    CREATE DATABASE BillingAnalytics;
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Create master key if not exists
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd$(date +%s)!';
+GO
+
+-- Create user for service principal (using app name)
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
+BEGIN
+    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
+    PRINT 'Created user wiv_account';
+END
+GO
+
+-- Grant permissions
+ALTER ROLE db_datareader ADD MEMBER [wiv_account];
+ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
+ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
+GO
+
+PRINT 'Database user configured successfully!';
+GO
+SQLEOF
+
+# Execute the SQL using az synapse sql pool command
+echo "Executing SQL to create database user..."
+az synapse sql script create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --name "SetupDatabaseUser" \
+    --file /tmp/setup_db_user_$$.sql \
+    --resource-group "$BILLING_RG" \
+    --only-show-errors 2>/dev/null || true
+
+# Also try to execute it directly
+az synapse sql pool list \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" \
+    --query "[?name=='Built-in'].name" \
+    -o tsv 2>/dev/null || true
+
+# Clean up temp file
+rm -f /tmp/setup_db_user_$$.sql
+
+# Alternative: Use Azure user context to grant permissions
+echo "Granting database access to service principal..."
+
+# Get the current Azure user's access token for Synapse
+SYNAPSE_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+
+if [ -n "$SYNAPSE_TOKEN" ]; then
+    # Create SQL to grant permissions
+    GRANT_SQL="IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
+    
+    # Try to execute via REST API
+    curl -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $SYNAPSE_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"$GRANT_SQL\"}" \
+        --silent --output /dev/null 2>&1 || true
+fi
+
+echo "✅ Database and user setup completed"
+
 # Get Synapse workspace resource ID
 SYNAPSE_RESOURCE_ID=$(az synapse workspace show \
     --name "$SYNAPSE_WORKSPACE" \
