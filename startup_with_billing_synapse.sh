@@ -1148,14 +1148,102 @@ echo "✅ Synapse workspace should be ready now!"
 
 echo ""
 echo "🔧 Setting up Synapse database and views automatically..."
-echo "Setting up database objects..."
+echo "Using sqlcmd with Azure AD authentication to create database and user..."
 
 # Generate a secure password for master key
 MASTER_KEY_PASSWORD="StrongP@ssw0rd$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)!"
 
-# Generate Python script for automated setup
-cat > setup_synapse_automated.py <<'PYTHON_EOF'
-import pyodbc
+# First, create the database and user using sqlcmd with Azure AD auth
+# This uses YOUR Azure AD credentials, not the service principal
+echo "📝 Creating database setup SQL script..."
+cat > /tmp/setup_synapse_db_$$.sql <<SQLEOF
+-- Create database if not exists
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
+    CREATE DATABASE BillingAnalytics;
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Create master key
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
+GO
+
+-- Create user for service principal (using wiv_account name)
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
+    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
+GO
+
+-- Grant permissions
+ALTER ROLE db_datareader ADD MEMBER [wiv_account];
+ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
+ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
+GO
+
+-- Create view for billing data
+CREATE OR ALTER VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    HEADER_ROW = TRUE
+) AS BillingExport;
+GO
+
+SELECT 'Database setup complete!' as Status;
+GO
+SQLEOF
+
+# Try to execute with sqlcmd using Azure AD authentication
+if command -v sqlcmd &> /dev/null; then
+    echo "📝 Executing database setup with sqlcmd and Azure AD authentication..."
+    
+    # Set PATH for sqlcmd if needed
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS paths
+        export PATH="/opt/homebrew/opt/mssql-tools18/bin:/opt/homebrew/opt/mssql-tools/bin:/usr/local/opt/mssql-tools/bin:$PATH"
+    else
+        # Linux paths
+        export PATH="/opt/mssql-tools18/bin:/opt/mssql-tools/bin:$PATH"
+    fi
+    
+    # Execute with Azure AD auth (-G flag)
+    sqlcmd -S ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net \
+           -d master \
+           -G \
+           -i /tmp/setup_synapse_db_$$.sql \
+           -o /tmp/sqlcmd_output_$$.txt 2>&1
+    
+    SQLCMD_RESULT=$?
+    
+    if [ $SQLCMD_RESULT -eq 0 ]; then
+        echo "✅ Database, user, and views created successfully with sqlcmd!"
+        cat /tmp/sqlcmd_output_$$.txt 2>/dev/null | grep -v "^$"
+        SETUP_COMPLETED=true
+    else
+        echo "⚠️ sqlcmd execution had issues. Output:"
+        cat /tmp/sqlcmd_output_$$.txt 2>/dev/null
+        echo ""
+        echo "Will try Python fallback method..."
+        SETUP_COMPLETED=false
+    fi
+    
+    # Clean up
+    rm -f /tmp/setup_synapse_db_$$.sql /tmp/sqlcmd_output_$$.txt
+else
+    echo "⚠️ sqlcmd not available, will try Python method..."
+    SETUP_COMPLETED=false
+fi
+
+# Only use Python as a fallback if sqlcmd didn't work
+if [ "$SETUP_COMPLETED" = "false" ]; then
+    echo "📝 Attempting setup with Python fallback..."
+    
+    # Generate Python script that does NOT try to connect as service principal first
+    cat > setup_synapse_automated.py <<'PYTHON_EOF'
+import subprocess
 import time
 import sys
 
@@ -1173,421 +1261,220 @@ config = {
     'sql_admin_password': '$SQL_ADMIN_PASSWORD'
 }
 
-def wait_for_synapse():
-    """Wait for Synapse to be ready with enhanced retry logic"""
-    # Use service principal connection
+print("🚀 Running Python-based Synapse setup...")
+print("📝 Creating database and user using Azure CLI token...")
+
+# First, try to create database and user using Azure CLI token
+try:
+    # Get Azure user's access token (not service principal)
+    result = subprocess.run(
+        ["az", "account", "get-access-token", "--resource", "https://database.windows.net", "--query", "accessToken", "-o", "tsv"],
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode == 0:
+        access_token = result.stdout.strip()
+        print("✅ Got Azure user access token")
+        
+        import requests
+        
+        # Create database
+        print("Creating BillingAnalytics database...")
+        db_url = f"https://{config['workspace_name']}-ondemand.sql.azuresynapse.net/sql/databases/master/query"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        
+        db_query = {"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics"}
+        db_response = requests.post(db_url, headers=headers, json=db_query, timeout=30)
+        
+        if db_response.status_code in [200, 201, 202]:
+            print("✅ Database created or already exists")
+        else:
+            print(f"⚠️ Database creation response: {db_response.status_code}")
+        
+        time.sleep(10)
+        
+        # Create master key and user
+        print("Creating master key and database user...")
+        setup_url = f"https://{config['workspace_name']}-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query"
+        
+        # Create master key
+        key_query = {"query": f"IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'"}
+        key_response = requests.post(setup_url, headers=headers, json=key_query, timeout=30)
+        
+        if key_response.status_code in [200, 201, 202]:
+            print("✅ Master key created or already exists")
+        
+        # Create user for service principal (using wiv_account name)
+        user_query = {"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}
+        user_response = requests.post(setup_url, headers=headers, json=user_query, timeout=30)
+        
+        if user_response.status_code in [200, 201, 202]:
+            print("✅ User 'wiv_account' created or already exists")
+        
+        # Grant permissions
+        grant_query = {"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}
+        grant_response = requests.post(setup_url, headers=headers, json=grant_query, timeout=30)
+        
+        if grant_response.status_code in [200, 201, 202]:
+            print("✅ Permissions granted to 'wiv_account'")
+        
+        print("✅ Database and user setup completed using Azure CLI token!")
+        
+    else:
+        print("⚠️ Could not get Azure user token")
+        print("   Please ensure you're logged in with 'az login'")
+        sys.exit(1)
+        
+except Exception as e:
+    print(f"⚠️ Error during setup: {str(e)[:200]}")
+    sys.exit(1)
+
+# Wait for changes to propagate
+print("⏳ Waiting for changes to propagate...")
+time.sleep(15)
+
+# NOW test if service principal can connect
+print("\n📝 Testing service principal connection...")
+import pyodbc
+
+try:
+    # Test connection with service principal
     conn_str = f"""
     DRIVER={{ODBC Driver 18 for SQL Server}};
     SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
-    DATABASE=master;
+    DATABASE=BillingAnalytics;
     UID={config['client_id']};
     PWD={config['client_secret']};
     Authentication=ActiveDirectoryServicePrincipal;
     Encrypt=yes;
     TrustServerCertificate=no;
-    Connection Timeout=60;
+    Connection Timeout=30;
     """
     
-    print("⏳ Checking Synapse workspace availability...")
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
     
-    # Enhanced retry logic with longer waits
-    max_attempts = 10
-    wait_times = [10, 20, 30, 30, 30, 60, 60, 60, 60, 60]  # Progressive backoff
+    # Test query
+    cursor.execute("SELECT USER_NAME() as usr, SUSER_NAME() as login")
+    result = cursor.fetchone()
+    print(f"✅ Service principal connected successfully!")
+    print(f"   User: {result.usr}, Login: {result.login}")
     
-    for attempt in range(max_attempts):
-        try:
-            conn = pyodbc.connect(conn_str, autocommit=True)
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            cursor.close()
-            conn.close()
-            print(f"✅ Synapse is ready! (after {sum(wait_times[:attempt])} seconds)")
-            return True
-        except pyodbc.Error as e:
-            if attempt < max_attempts - 1:
-                wait_time = wait_times[attempt]
-                if "Login timeout expired" in str(e) or "Login failed" in str(e):
-                    print(f"⏳ Synapse needs more time to initialize...")
-                else:
-                    print(f"⏳ Waiting for Synapse... ({sum(wait_times[:attempt+1])} seconds elapsed)")
-                time.sleep(wait_time)
-            else:
-                print(f"❌ Could not connect after {sum(wait_times)} seconds: {str(e)[:100]}")
-                return False
-    
-    return False
-
-# Wait for Synapse to be ready
-if not wait_for_synapse():
-    print("")
-    print("⚠️  Automated setup needs more time. This is normal for new workspaces.")
-    print("")
-    print("✅ Good news: Your Synapse workspace IS created and working!")
-    print("")
-    print("📝 What to do next:")
-    print("   Option 1: Wait 2-3 minutes and re-run this script")
-    print("   Option 2: Run the manual setup in Synapse Studio:")
-    print("            - Open: https://web.azuresynapse.net")
-    print("            - Select your workspace: {config['workspace_name']}")
-    print("            - Run the SQL from: synapse_billing_setup.sql")
-    print("")
-    print("💡 This delay only happens on first setup. Future connections will be instant.")
-    sys.exit(0)
-
-# Connection string for master database
-master_conn_str = f"""
-DRIVER={{ODBC Driver 18 for SQL Server}};
-SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
-DATABASE=master;
-UID={config['client_id']};
-PWD={config['client_secret']};
-Authentication=ActiveDirectoryServicePrincipal;
-Encrypt=yes;
-TrustServerCertificate=no;
-Connection Timeout=60;
-"""
-
-# Create database with enhanced retry logic
-print("📦 Creating BillingAnalytics database...")
-db_created = False
-max_db_retries = 10
-db_wait_time = 10
-
-for retry in range(max_db_retries):
+    # Create the billing data view
+    print("\n📝 Creating BillingData view...")
     try:
-        conn = pyodbc.connect(master_conn_str, autocommit=True)
-        cursor = conn.cursor()
-        
-        # Check if database already exists
-        cursor.execute("SELECT name FROM sys.databases WHERE name = 'BillingAnalytics'")
-        if cursor.fetchone():
-            print("✅ BillingAnalytics database already exists!")
-            db_created = True
-        else:
-            # Try to create database
-            cursor.execute("CREATE DATABASE BillingAnalytics")
-            print("✅ BillingAnalytics database created!")
-            db_created = True
-        
-        cursor.close()
-        conn.close()
-        break
-    except pyodbc.Error as e:
-        if "already exists" in str(e):
-            print("✅ Database already exists!")
-            db_created = True
-            break
-        elif "Could not obtain exclusive lock" in str(e):
-            if retry < max_db_retries - 1:
-                print(f"⏳ Azure is initializing, waiting {db_wait_time} seconds... (attempt {retry + 1}/{max_db_retries})")
-                time.sleep(db_wait_time)
-                # Increase wait time for later retries
-                if retry > 3:
-                    db_wait_time = 20
-            else:
-                print(f"⚠️ Database lock persists after {retry + 1} attempts")
-                print("   Azure needs more time to initialize internal databases")
-        else:
-            print(f"⚠️ Database creation issue: {str(e)[:100]}")
-            if retry < max_db_retries - 1:
-                time.sleep(db_wait_time)
-
-if not db_created:
-    print("⚠️ Could not create database automatically due to Azure initialization.")
-    print("   The database will be created on next run. Continuing with remaining setup...")
-
-# Connection string for BillingAnalytics database
-billing_conn_str = f"""
-DRIVER={{ODBC Driver 18 for SQL Server}};
-SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
-DATABASE=BillingAnalytics;
-UID={config['client_id']};
-PWD={config['client_secret']};
-Authentication=ActiveDirectoryServicePrincipal;
-Encrypt=yes;
-TrustServerCertificate=no;
-Connection Timeout=60;
-"""
-
-# Setup commands - Simplified for Managed Identity (no SAS tokens needed!)
-print("\n🔧 Setting up database objects with Managed Identity...")
-
-# Wait longer for database to be ready
-time.sleep(10)
-
-# Try to connect and setup with enhanced retry
-setup_success = False
-max_setup_retries = 5
-setup_wait_time = 15
-
-for retry in range(max_setup_retries):
-    try:
-        conn = pyodbc.connect(billing_conn_str, autocommit=True)
-        cursor = conn.cursor()
-        
-        # Create master key
-        try:
-            cursor.execute(f"CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'")
-            print("✅ Master key created")
-        except pyodbc.Error as e:
-            if "already exists" in str(e):
-                print("✅ Master key already exists")
-            else:
-                print(f"⚠️ Master key: {str(e)[:100]}")
-        
-        # Create database user for the service principal (using wiv_account name)
-        try:
-            cursor.execute("CREATE USER [wiv_account] FROM EXTERNAL PROVIDER")
-            print("✅ Database user 'wiv_account' created for service principal")
-        except pyodbc.Error as e:
-            if "already exists" in str(e):
-                print("✅ Database user 'wiv_account' already exists")
-            else:
-                print(f"⚠️ Database user creation: {str(e)[:100]}")
-        
-        # Grant necessary permissions to the service principal
-        try:
-            cursor.execute("ALTER ROLE db_datareader ADD MEMBER [wiv_account]")
-            cursor.execute("ALTER ROLE db_datawriter ADD MEMBER [wiv_account]")
-            cursor.execute("ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]")
-            print("✅ Database permissions granted to wiv_account")
-        except pyodbc.Error as e:
-            if "already a member" in str(e):
-                print("✅ wiv_account already has database permissions")
-            else:
-                print(f"⚠️ Permission grant: {str(e)[:100]}")
-        
-        # Drop old view if exists and create improved view
-        try:
-            cursor.execute("IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData') DROP VIEW BillingData")
-        except:
-            pass
-        
-        # Create improved view that automatically gets only the latest export file
-        # This prevents data duplication from cumulative month-to-date exports
         cursor.execute(f"""
-            CREATE VIEW BillingData AS
-            WITH LatestExport AS (
-                SELECT MAX(filepath(1)) as LatestPath
-                FROM OPENROWSET(
-                    BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv',
-                    FORMAT = 'CSV',
-                    PARSER_VERSION = '2.0',
-                    FIRSTROW = 2
-                ) AS files
-            )
-            SELECT *
-            FROM OPENROWSET(
-                BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv',
-                FORMAT = 'CSV',
-                PARSER_VERSION = '2.0',
-                FIRSTROW = 2
-            )
-            WITH (
-                date NVARCHAR(100),
-                serviceFamily NVARCHAR(200),
-                meterCategory NVARCHAR(200),
-                meterSubCategory NVARCHAR(200),
-                meterName NVARCHAR(500),
-                billingAccountName NVARCHAR(200),
-                costCenter NVARCHAR(100),
-                resourceGroupName NVARCHAR(200),
-                resourceLocation NVARCHAR(100),
-                consumedService NVARCHAR(200),
-                ResourceId NVARCHAR(1000),
-                chargeType NVARCHAR(100),
-                publisherType NVARCHAR(100),
-                quantity NVARCHAR(100),
-                costInBillingCurrency NVARCHAR(100),
-                costInUsd NVARCHAR(100),
-                PayGPrice NVARCHAR(100),
-                billingCurrency NVARCHAR(10),
-                subscriptionName NVARCHAR(200),
-                SubscriptionId NVARCHAR(100),
-                ProductName NVARCHAR(500),
-                frequency NVARCHAR(100),
-                unitOfMeasure NVARCHAR(100),
-                tags NVARCHAR(4000)
-            ) AS BillingData
-            WHERE filepath(1) = (SELECT LatestPath FROM LatestExport)
+        CREATE OR ALTER VIEW BillingData AS
+        SELECT *
+        FROM OPENROWSET(
+            BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv',
+            FORMAT = 'CSV',
+            PARSER_VERSION = '2.0',
+            HEADER_ROW = TRUE
+        ) AS BillingExport
         """)
-        print("✅ BillingData view created (with automatic latest file filtering)")
-        
-        cursor.close()
-        conn.close()
-        setup_success = True
-        break
-        
-    except pyodbc.Error as e:
-        error_str = str(e)
-        if "Login failed" in error_str:
-            if retry < max_setup_retries - 1:
-                print(f"⏳ Waiting for permissions to propagate... (attempt {retry + 1}/{max_setup_retries})")
-                time.sleep(setup_wait_time)
-        elif "Invalid object name 'BillingAnalytics'" in error_str or "Database 'BillingAnalytics' does not exist" in error_str:
-            if not db_created:
-                print("⚠️ Database doesn't exist yet. This will be created on next run.")
-                break
-            else:
-                print(f"⏳ Waiting for database to be accessible... (attempt {retry + 1}/{max_setup_retries})")
-                time.sleep(setup_wait_time)
-        else:
-            print(f"⚠️ Setup issue: {error_str[:100]}")
-            if retry < max_setup_retries - 1:
-                time.sleep(setup_wait_time)
-
-if setup_success:
-    print("\n✅ Synapse database setup completed successfully!")
-    
-    # Test the view
-    print("\n🔍 Testing the view (automatically filters latest export)...")
-    try:
-        test_conn = pyodbc.connect(billing_conn_str)
-        test_cursor = test_conn.cursor()
-        test_cursor.execute("SELECT COUNT(*) as RecordCount FROM BillingData")
-        row = test_cursor.fetchone()
-        print(f"✅ View is working! Found {row[0]} billing records (from latest export only)")
-        print("   ℹ️  View automatically filters to latest file to prevent duplication")
-        test_cursor.close()
-        test_conn.close()
+        print("✅ BillingData view created successfully!")
     except Exception as e:
-        print(f"⚠️  Could not test view: {str(e)[:100]}")
-        print("   This is normal if no billing data has been exported yet")
-else:
-    if db_created:
-        print("\n⚠️ Database created but view setup incomplete.")
-        print("   This can happen on first run. The view will be created on next run.")
+        if "already exists" in str(e):
+            print("✅ BillingData view already exists")
+        else:
+            print(f"⚠️ View creation: {str(e)[:100]}")
+    
+    cursor.close()
+    conn.close()
+    
+    print("\n✅ Database setup completed successfully!")
+    print("   You can now run queries against BillingAnalytics.dbo.BillingData")
+    
+except pyodbc.Error as e:
+    if "Login failed" in str(e):
+        print("❌ Service principal still cannot connect")
+        print(f"   Error: {str(e)[:200]}")
+        print("\n📝 Manual intervention required:")
+        print("   1. Open Synapse Studio: https://web.azuresynapse.net")
+        print(f"   2. Select workspace: {config['workspace_name']}")
+        print("   3. Run this SQL:")
+        print("      CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;")
+        print("      ALTER ROLE db_datareader ADD MEMBER [wiv_account];")
+        print("      ALTER ROLE db_datawriter ADD MEMBER [wiv_account];")
+        print("      ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];")
     else:
-        print("\n⚠️ Initial setup incomplete due to Azure initialization.")
-        print("   This is NORMAL for new Synapse workspaces.")
-        print("   ✅ Your workspace IS created and will be ready soon!")
-        print("   📝 Just re-run this script in 2-3 minutes to complete setup.")
+        print(f"⚠️ Connection error: {str(e)[:200]}")
 
-print("\n📊 Query to use in Synapse Studio:")
-print("   SELECT * FROM BillingAnalytics.dbo.BillingData")
-print("   ℹ️  Note: View automatically returns only latest export data (no duplication)")
 PYTHON_EOF
 
-# Check if Python and pyodbc are available
-if command -v python3 >/dev/null 2>&1; then
-    # Check for pyodbc
-    if ! python3 -c "import pyodbc" 2>/dev/null; then
-        echo "📦 Installing pyodbc for automated setup..."
-        # Try to install pyodbc and dependencies
-        if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
-            # Debian/Ubuntu with sudo
-            sudo apt-get update >/dev/null 2>&1
-            sudo apt-get install -y unixodbc-dev >/dev/null 2>&1
+    # Execute the Python fallback script
+    if command -v python3 >/dev/null 2>&1; then
+        # Check for required Python packages
+        if python3 -c "import pyodbc; import requests; import subprocess" 2>/dev/null; then
+            echo "📝 Executing Python fallback setup..."
             
-            # Install Microsoft ODBC Driver
-            if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" >/dev/null 2>&1; then
-                # Try to get Ubuntu version, default to 22.04 if not available
-                UBUNTU_VERSION="22.04"
-                if command -v lsb_release >/dev/null 2>&1; then
-                    UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "22.04")
-                fi
-                
-                curl https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg 2>/dev/null
-                curl -s https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/prod.list 2>/dev/null | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
-                sudo apt-get update >/dev/null 2>&1
-                sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 >/dev/null 2>&1
-            fi
-        elif command -v apt-get >/dev/null 2>&1; then
-            # Debian/Ubuntu without sudo (running as root)
-            apt-get update >/dev/null 2>&1
-            apt-get install -y unixodbc-dev >/dev/null 2>&1
-        elif command -v yum >/dev/null 2>&1; then
-            # RHEL/CentOS
-            if command -v sudo >/dev/null 2>&1; then
-                sudo yum install -y unixODBC-devel >/dev/null 2>&1
+            # Variable substitution for the Python script
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                # macOS sed syntax
+                sed -i '' "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
+                sed -i '' "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
+                sed -i '' "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
+                sed -i '' "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
+                sed -i '' "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
+                sed -i '' "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
+                sed -i '' "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
+                sed -i '' "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
             else
-                yum install -y unixODBC-devel >/dev/null 2>&1
+                # Linux sed syntax
+                sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
+                sed -i "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
+                sed -i "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
+                sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
+                sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
+                sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
+                sed -i "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
+                sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
             fi
-        fi
-        
-        # Install pyodbc - try different methods
-        pip3 install pyodbc --quiet 2>/dev/null || \
-        pip install pyodbc --quiet 2>/dev/null || \
-        python3 -m pip install pyodbc --quiet 2>/dev/null || \
-        (command -v sudo >/dev/null 2>&1 && sudo pip3 install pyodbc --quiet 2>/dev/null) || \
-        echo "⚠️  Could not install pyodbc automatically"
-    fi
-    
-    # Try to run the automated setup
-    if python3 -c "import pyodbc" 2>/dev/null; then
-        echo "🚀 Running automated Synapse setup..."
-        # Replace variables in Python script - handle both macOS and Linux sed
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS sed requires backup extension
-            sed -i '' "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
-            sed -i '' "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
-            sed -i '' "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
-            sed -i '' "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
-            sed -i '' "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
-            sed -i '' "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
-            sed -i '' "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
-            sed -i '' "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
-            sed -i '' "s/\$SQL_ADMIN_USER/$SQL_ADMIN_USER/g" setup_synapse_automated.py
-            sed -i '' "s/\$SQL_ADMIN_PASSWORD/$SQL_ADMIN_PASSWORD/g" setup_synapse_automated.py
+            
+            # Execute the Python script
+            python3 setup_synapse_automated.py
+            SETUP_COMPLETED=$?
+            
+            # Clean up
+            rm -f setup_synapse_automated.py
+            
+            if [ $SETUP_COMPLETED -eq 0 ]; then
+                echo "✅ Database setup completed via Python fallback!"
+            else
+                echo "⚠️ Python fallback had issues, but database may still be partially configured"
+            fi
         else
-            # Linux sed
-            sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
-            sed -i "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
-            sed -i "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
-            sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
-            sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
-            sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
-            sed -i "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
-            sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
-            sed -i "s/\$SQL_ADMIN_USER/$SQL_ADMIN_USER/g" setup_synapse_automated.py
-            sed -i "s/\$SQL_ADMIN_PASSWORD/$SQL_ADMIN_PASSWORD/g" setup_synapse_automated.py
+            echo "⚠️ Required Python packages not available for fallback setup"
+            echo "   Please install: pip install pyodbc requests"
         fi
-        
-        python3 setup_synapse_automated.py && SETUP_COMPLETED=true
-        rm -f setup_synapse_automated.py
     else
-        echo "⚠️  Could not install pyodbc automatically"
-        echo "   Trying alternative methods to complete setup..."
-        SETUP_COMPLETED=false
+        echo "⚠️ Python not available for fallback setup"
     fi
-else
-    echo "⚠️  Python not available for automated setup"
-    echo "   Trying alternative methods to complete setup..."
-    SETUP_COMPLETED=false
-fi
+fi  # End of SETUP_COMPLETED check
+
+# Continue with the rest of the script regardless of setup method
 
 # ===========================
-# ALTERNATIVE SQL EXECUTION METHODS
+# FINAL SETUP STATUS
 # ===========================
 if [ "$SETUP_COMPLETED" != "true" ]; then
     echo ""
-    echo "🔧 Attempting alternative methods to create database and view..."
-    
-    # Method 1: Try using sqlcmd if available
-    if command -v sqlcmd >/dev/null 2>&1; then
-        echo "📝 Method 1: Using sqlcmd..."
-        sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
-               -d master \
-               -U "$APP_ID" \
-               -P "$CLIENT_SECRET" \
-               -G \
-               -Q "CREATE DATABASE BillingAnalytics" 2>/dev/null && \
-        sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
-               -d BillingAnalytics \
-               -U "$APP_ID" \
-               -P "$CLIENT_SECRET" \
-               -G \
-               -i synapse_billing_setup.sql 2>/dev/null && \
-        echo "✅ Database and view created successfully with sqlcmd!" && \
-        SETUP_COMPLETED=true
-    fi
-    
-    # Method 2: Try using Azure CLI with REST API
-    if [ "$SETUP_COMPLETED" != "true" ]; then
-        echo "📝 Method 2: Using Azure CLI REST API..."
-        
-        # Get access token for Synapse
-        ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+    echo "⚠️ Automated database setup could not complete"
+    echo ""
+    echo "📝 Manual setup required:"
+    echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
+    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
+    echo "   3. Go to Develop → SQL scripts → New SQL script"
+    echo "   4. Run the SQL from: synapse_billing_setup.sql"
+    echo ""
+    echo "   This only needs to be done once. After that, the service principal will work."
+fi
+
+# Create backup SQL script for manual execution
+cat > synapse_billing_setup.sql <<EOF
+-- ========================================================
         
         if [ -n "$ACCESS_TOKEN" ]; then
             # Try to create database using REST API
