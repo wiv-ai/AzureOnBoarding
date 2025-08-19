@@ -152,6 +152,45 @@ try:
     except Exception as e:
         print(f"❌ Error: {str(e)[:200]}")
     
+    # Test Query 5: Cost per Customer Subscription
+    print("\n" + "="*70)
+    print("Query 5: Cost per Customer Subscription (Top 20)")
+    print("-"*70)
+    
+    customer_query = """
+    SELECT TOP 20
+        SubAccountName as CustomerSubscription,
+        SubAccountId as SubscriptionId,
+        SUM(TRY_CAST(EffectiveCost as FLOAT)) as TotalCost,
+        SUM(TRY_CAST(BilledCost as FLOAT)) as BilledCost,
+        COUNT(*) as Transactions,
+        COUNT(DISTINCT ServiceName) as UniqueServices
+    FROM BillingData
+    WHERE SubAccountName IS NOT NULL
+        AND SubAccountName != ''
+    GROUP BY SubAccountName, SubAccountId
+    ORDER BY TotalCost DESC
+    """
+    
+    try:
+        df = pd.read_sql(customer_query, conn)
+        print("\n✅ Customer subscription costs query successful!")
+        print("\n📊 Top 20 Customer Subscriptions by Cost:")
+        print("-"*70)
+        
+        # Format for better display
+        for idx, row in df.iterrows():
+            print(f"{idx+1:2}. {row['CustomerSubscription'][:40]:<40} ${row['TotalCost']:>10,.2f} ({row['Transactions']:,} transactions)")
+        
+        # Summary statistics
+        print(f"\n📈 Summary:")
+        print(f"  Total cost (top 20): ${df['TotalCost'].sum():,.2f}")
+        print(f"  Average cost per customer: ${df['TotalCost'].mean():,.2f}")
+        print(f"  Total transactions: {df['Transactions'].sum():,}")
+        
+    except Exception as e:
+        print(f"❌ Error: {str(e)[:200]}")
+    
     cursor.close()
     conn.close()
     
@@ -163,7 +202,14 @@ try:
     print("  - Use ChargePeriodStart/ChargePeriodEnd for dates")
     print("  - Use EffectiveCost, BilledCost for cost data")
     print("  - Use ServiceName, ServiceCategory for service info")
+    print("  - Use SubAccountName for customer/subscription grouping")
     print("  - MonthlyCosts view provides pre-aggregated data")
+    print("\n📊 Queries tested:")
+    print("  1. Daily costs (last 7 days)")
+    print("  2. Service costs summary")
+    print("  3. Monthly cost trend")
+    print("  4. Top services from MonthlyCosts view")
+    print("  5. Cost per customer subscription")
     
 except Exception as e:
     print(f"❌ Connection failed: {e}")
