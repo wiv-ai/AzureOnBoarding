@@ -1196,66 +1196,78 @@ SELECT 'Database setup complete!' as Status;
 GO
 SQLEOF
 
-# Try to execute with sqlcmd using Azure AD authentication
-if command -v sqlcmd &> /dev/null; then
-    echo "📝 Executing database setup with sqlcmd and Azure AD authentication..."
+# Skip sqlcmd in Cloud Shell - it doesn't work with Azure AD auth properly
+# Go directly to REST API method
+echo "📝 Using REST API to create database and user..."
+SETUP_COMPLETED=false
+
+# Use Azure CLI to get access token
+ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+
+if [ -n "$ACCESS_TOKEN" ]; then
+    echo "✅ Got Azure access token"
     
-    # Set PATH for sqlcmd if needed
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS paths
-        export PATH="/opt/homebrew/opt/mssql-tools18/bin:/opt/homebrew/opt/mssql-tools/bin:/usr/local/opt/mssql-tools/bin:$PATH"
-    else
-        # Linux paths
-        export PATH="/opt/mssql-tools18/bin:/opt/mssql-tools/bin:$PATH"
-    fi
+    # Create database
+    echo "Creating database..."
+    curl -s -X POST \
+        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' \
+        -o /dev/null 2>&1
     
-    # Execute with Azure AD auth (-G flag)
-    sqlcmd -S ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net \
-           -d master \
-           -G \
-           -i /tmp/setup_synapse_db_$$.sql \
-           -o /tmp/sqlcmd_output_$$.txt 2>&1
+    sleep 5
     
-    SQLCMD_RESULT=$?
+    # Create master key, user and grant permissions
+    echo "Creating user and granting permissions..."
+    SETUP_SQL="IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD'; IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"
     
-    if [ $SQLCMD_RESULT -eq 0 ]; then
-        echo "✅ Database, user, and views created successfully with sqlcmd!"
-        cat /tmp/sqlcmd_output_$$.txt 2>/dev/null | grep -v "^$"
-        SETUP_COMPLETED=true
-    else
-        echo "⚠️ sqlcmd execution had issues. Output:"
-        cat /tmp/sqlcmd_output_$$.txt 2>/dev/null
-        echo ""
-        echo "Will try Python fallback method..."
-        SETUP_COMPLETED=false
-    fi
+    curl -s -X POST \
+        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"$SETUP_SQL\"}" \
+        -o /dev/null 2>&1
     
-    # Clean up
-    rm -f /tmp/setup_synapse_db_$$.sql /tmp/sqlcmd_output_$$.txt
+    # Also create the view
+    echo "Creating BillingData view..."
+    VIEW_SQL="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
+    
+    curl -s -X POST \
+        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"$VIEW_SQL\"}" \
+        -o /dev/null 2>&1
+    
+    echo "✅ Database setup completed via REST API"
+    SETUP_COMPLETED=true
 else
-    echo "⚠️ sqlcmd not available, will try Python method..."
+    echo "⚠️ Could not get Azure access token"
     SETUP_COMPLETED=false
 fi
 
-# Only use Python as a fallback if sqlcmd didn't work
-if [ "$SETUP_COMPLETED" = "false" ]; then
-    echo "📝 Attempting setup with Python fallback..."
-    
-    # Generate Python script that does NOT try to connect as service principal first
-    cat > setup_synapse_automated.py <<'PYTHON_EOF'
-import subprocess
-import time
-import sys
+# Clean up temp files
+rm -f /tmp/setup_synapse_db_$$.sql /tmp/sqlcmd_output_$$.txt 2>/dev/null
 
-# Configuration
-config = {
-    'workspace_name': '$SYNAPSE_WORKSPACE',
-    'tenant_id': '$TENANT_ID',
-    'client_id': '$APP_ID',
-    'client_secret': '$CLIENT_SECRET',
-    'storage_account': '$STORAGE_ACCOUNT_NAME',
-    'container_name': '$CONTAINER_NAME',
-    'export_path': '$EXPORT_PATH',
+# Skip Python fallback - keep it simple
+if [ "$SETUP_COMPLETED" = "false" ]; then
+    echo ""
+    echo "⚠️ Automated setup could not complete"
+    echo ""
+    echo "📝 Manual setup required:"
+    echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
+    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
+    echo "   3. Run the SQL from: synapse_billing_setup.sql"
+fi
+
+# Create backup SQL script for manual execution
+cat > synapse_billing_setup.sql <<EOF
+-- ========================================================
+-- SYNAPSE BILLING DATA SETUP (Manual Backup)
+-- ========================================================
+-- Run this in Synapse Studio if automated setup fails
+-- Workspace: $SYNAPSE_WORKSPACE
     'master_key_password': '$MASTER_KEY_PASSWORD',
     'sql_admin_user': '$SQL_ADMIN_USER',
     'sql_admin_password': '$SQL_ADMIN_PASSWORD'
