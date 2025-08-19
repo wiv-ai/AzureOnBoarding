@@ -200,11 +200,7 @@ if [ "$RG_EXISTS" = "true" ]; then
     AZURE_REGION=$(az group show --name "$BILLING_RG" --query location -o tsv)
     echo "✅ Using existing resource group '$BILLING_RG' in region: $AZURE_REGION"
 else
-<<<<<<< HEAD
-    # Resource group doesn't exist, create it in northeurope
-=======
     # Resource group doesn't exist, create it in eastus2 (or another region that supports Synapse)
->>>>>>> 952f138 (fix: change region to northeurope)
     AZURE_REGION="northeurope"
     echo "📍 Creating resource group '$BILLING_RG' in region: $AZURE_REGION"
     az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
