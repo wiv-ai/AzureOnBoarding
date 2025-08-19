@@ -31,12 +31,17 @@ def fix_database_user():
     print()
     print("3. Go to 'Develop' hub → New SQL script")
     print()
-    print("4. Connect to 'BillingAnalytics' database")
+    print("4. IMPORTANT: Select 'BillingAnalytics' database (NOT master!)")
+    print("   In the toolbar, change from 'master' to 'BillingAnalytics'")
     print()
     print("5. Run these commands:")
     print()
     print("-" * 70)
     print(f"""
+-- IMPORTANT: Make sure you're connected to BillingAnalytics database, not master!
+USE BillingAnalytics;
+GO
+
 -- Create database user for the service principal
 CREATE USER [{config['client_id']}] FROM EXTERNAL PROVIDER;
 
