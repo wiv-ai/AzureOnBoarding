@@ -187,7 +187,7 @@ def execute_sql(sql_commands):
         print(f"❌ Connection failed: {e}")
         return False
 
-# Create SQL commands - handle all parts automatically
+# Create SQL commands - just one simple view for all data
 sql_commands = [
     # Drop existing views
     "DROP VIEW IF EXISTS BillingData",
@@ -195,83 +195,24 @@ sql_commands = [
     "DROP VIEW IF EXISTS MonthlyCosts",
     "DROP VIEW IF EXISTS ServiceCosts",
     
-    # Create main view that reads ALL parts from ALL date ranges
-    f"""
-    CREATE VIEW BillingDataAll AS
-    SELECT *
-    FROM OPENROWSET(
-        BULK 'https://{STORAGE_ACCOUNT}.blob.core.windows.net/{CONTAINER}/daily/wiv-focus-cost/*/*/*.csv',
-        FORMAT = 'CSV',
-        PARSER_VERSION = '2.0',
-        HEADER_ROW = TRUE
-    ) AS BillingExport
-    """,
-    
-    # Create view for the current/latest export only
+    # Create single view that reads ALL parts from ALL date ranges
     f"""
     CREATE VIEW BillingData AS
     SELECT *
     FROM OPENROWSET(
-        BULK '{primary_bulk_path}',
+        BULK 'https://{STORAGE_ACCOUNT}.blob.core.windows.net/{CONTAINER}/daily/wiv-focus-cost/*/*/*.csv',
         FORMAT = 'CSV',
         PARSER_VERSION = '2.0',
         HEADER_ROW = TRUE
     ) AS BillingExport
-    """,
-    
-    # Create monthly summary view
-    f"""
-    CREATE VIEW MonthlyCosts AS
-    SELECT 
-        YEAR(TRY_CAST(ChargePeriodStart as DATE)) as Year,
-        MONTH(TRY_CAST(ChargePeriodStart as DATE)) as Month,
-        ServiceName,
-        ServiceCategory,
-        SUM(TRY_CAST(EffectiveCost as FLOAT)) as TotalCost,
-        SUM(TRY_CAST(BilledCost as FLOAT)) as BilledCost,
-        COUNT(*) as TransactionCount
-    FROM OPENROWSET(
-        BULK 'https://{STORAGE_ACCOUNT}.blob.core.windows.net/{CONTAINER}/daily/wiv-focus-cost/*/*/*.csv',
-        FORMAT = 'CSV',
-        PARSER_VERSION = '2.0',
-        HEADER_ROW = TRUE
-    ) AS MonthlyData
-    WHERE ChargePeriodStart IS NOT NULL
-        AND EffectiveCost IS NOT NULL
-    GROUP BY 
-        YEAR(TRY_CAST(ChargePeriodStart as DATE)),
-        MONTH(TRY_CAST(ChargePeriodStart as DATE)),
-        ServiceName,
-        ServiceCategory
-    """,
-    
-    # Create service costs view
-    f"""
-    CREATE VIEW ServiceCosts AS
-    SELECT 
-        ServiceName,
-        ServiceCategory,
-        Region,
-        SUM(TRY_CAST(EffectiveCost as FLOAT)) as TotalCost,
-        COUNT(*) as UsageCount,
-        MIN(TRY_CAST(ChargePeriodStart as DATE)) as FirstUsage,
-        MAX(TRY_CAST(ChargePeriodEnd as DATE)) as LastUsage
-    FROM OPENROWSET(
-        BULK 'https://{STORAGE_ACCOUNT}.blob.core.windows.net/{CONTAINER}/daily/wiv-focus-cost/*/*/*.csv',
-        FORMAT = 'CSV',
-        PARSER_VERSION = '2.0',
-        HEADER_ROW = TRUE
-    ) AS ServiceData
-    WHERE ServiceName IS NOT NULL
-    GROUP BY ServiceName, ServiceCategory, Region
     """
 ]
 
 if execute_sql(sql_commands):
     print("\n✅ Views created successfully!")
     
-    # Step 5: Test the views
-    print(f"\n🧪 Step 5: Testing the views...")
+    # Step 5: Test the view
+    print(f"\n🧪 Step 5: Testing the BillingData view...")
     print("-"*70)
     
     conn_str = (
@@ -289,43 +230,42 @@ if execute_sql(sql_commands):
         conn = pyodbc.connect(conn_str)
         cursor = conn.cursor()
         
-        # Test row counts
-        print("\n📊 Testing views and getting row counts...")
+        # Test row count
+        print("\n📊 Testing BillingData view...")
         
-        test_queries = [
-            ("BillingData (current month)", "SELECT COUNT(*) FROM BillingData"),
-            ("BillingDataAll (all months)", "SELECT COUNT(*) FROM BillingDataAll"),
-            ("MonthlyCosts", "SELECT COUNT(*) FROM MonthlyCosts"),
-            ("ServiceCosts", "SELECT COUNT(*) FROM ServiceCosts")
-        ]
+        try:
+            cursor.execute("SELECT COUNT(*) FROM BillingData")
+            count = cursor.fetchone()[0]
+            print(f"   ✅ BillingData: {count:,} rows")
+        except pyodbc.Error as e:
+            print(f"   ❌ BillingData: Error - {str(e)[:100]}")
         
-        for view_name, query in test_queries:
-            try:
-                cursor.execute(query)
-                count = cursor.fetchone()[0]
-                print(f"   ✅ {view_name}: {count:,} rows")
-            except pyodbc.Error as e:
-                print(f"   ❌ {view_name}: Error - {str(e)[:100]}")
-        
-        # Get sample data from MonthlyCosts
-        print("\n📊 Sample Monthly Costs:")
+        # Get sample aggregated data
+        print("\n📊 Sample costs by service:")
         print("-"*60)
         try:
             cursor.execute("""
                 SELECT TOP 10 
-                    Year, Month, ServiceName, 
-                    ROUND(TotalCost, 2) as Cost
-                FROM MonthlyCosts 
-                WHERE TotalCost > 0
+                    ServiceName,
+                    ServiceCategory,
+                    SUM(TRY_CAST(EffectiveCost as FLOAT)) as TotalCost,
+                    COUNT(*) as Transactions
+                FROM BillingData
+                WHERE ServiceName IS NOT NULL
+                GROUP BY ServiceName, ServiceCategory
                 ORDER BY TotalCost DESC
             """)
             
             rows = cursor.fetchall()
             if rows:
-                print(f"{'Year':<6} {'Month':<6} {'Service':<30} {'Cost':>12}")
+                print(f"{'Service':<30} {'Category':<20} {'Cost':>12} {'Count':>8}")
                 print("-"*60)
                 for row in rows:
-                    print(f"{row[0]:<6} {row[1]:<6} {row[2][:28]:<30} ${row[3]:>11,.2f}")
+                    service = str(row[0])[:28] if row[0] else 'N/A'
+                    category = str(row[1])[:18] if row[1] else 'N/A'
+                    cost = row[2] if row[2] else 0
+                    count = row[3] if row[3] else 0
+                    print(f"{service:<30} {category:<20} ${cost:>11,.2f} {count:>8,}")
             
         except pyodbc.Error as e:
             print(f"Could not get sample data: {str(e)[:100]}")
@@ -339,27 +279,31 @@ if execute_sql(sql_commands):
     print("\n" + "="*70)
     print("✅ SETUP COMPLETE!")
     print("="*70)
-    print(f"\n📋 Available Views:")
-    print(f"  1. BillingData      - Current month's data only ({bulk_paths[-1].split('/')[-3]})")
-    print(f"  2. BillingDataAll   - All historical data (all parts from all months)")
-    print(f"  3. MonthlyCosts     - Aggregated monthly costs by service")
-    print(f"  4. ServiceCosts     - Total costs by service across all time")
+    print(f"\n📋 View Created:")
+    print(f"  BillingData - All billing data from all date ranges and parts")
     print(f"\n🔗 Data Source:")
     print(f"  Storage: {STORAGE_ACCOUNT}/{CONTAINER}")
     print(f"  Files: {len(csv_files)} CSV files (in {len(csv_groups)} date range(s))")
     print(f"  Parts: Automatically combined from all part_X_XXXX.csv files")
+    print(f"  Path: https://{STORAGE_ACCOUNT}.blob.core.windows.net/{CONTAINER}/daily/wiv-focus-cost/*/*/*.csv")
     print(f"\n💡 Example Queries:")
-    print(f"  -- Current month's top costs")
-    print(f"  SELECT TOP 100 * FROM BillingData ORDER BY EffectiveCost DESC")
+    print(f"  -- Get all raw data")
+    print(f"  SELECT * FROM BillingData")
+    print(f"  ")
+    print(f"  -- Top costs by service")
+    print(f"  SELECT ServiceName, SUM(TRY_CAST(EffectiveCost as FLOAT)) as TotalCost")
+    print(f"  FROM BillingData")
+    print(f"  GROUP BY ServiceName")
+    print(f"  ORDER BY TotalCost DESC")
     print(f"  ")
     print(f"  -- Monthly trend")
-    print(f"  SELECT Year, Month, SUM(TotalCost) as MonthlyTotal")
-    print(f"  FROM MonthlyCosts")
-    print(f"  GROUP BY Year, Month")
+    print(f"  SELECT ")
+    print(f"    YEAR(TRY_CAST(ChargePeriodStart as DATE)) as Year,")
+    print(f"    MONTH(TRY_CAST(ChargePeriodStart as DATE)) as Month,")
+    print(f"    SUM(TRY_CAST(EffectiveCost as FLOAT)) as MonthlyTotal")
+    print(f"  FROM BillingData")
+    print(f"  GROUP BY YEAR(TRY_CAST(ChargePeriodStart as DATE)), MONTH(TRY_CAST(ChargePeriodStart as DATE))")
     print(f"  ORDER BY Year, Month")
-    print(f"  ")
-    print(f"  -- Top services by cost")
-    print(f"  SELECT TOP 20 * FROM ServiceCosts ORDER BY TotalCost DESC")
     
 else:
     print("\n❌ Failed to create views")
