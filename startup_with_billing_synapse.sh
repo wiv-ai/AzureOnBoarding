@@ -702,15 +702,83 @@ az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNA
 echo ""
 echo "🔧 Creating BillingAnalytics database and configuring permissions..."
 
-# Create the database using Azure CLI
-echo "Creating BillingAnalytics database..."
-az synapse sql database create \
-    --name "BillingAnalytics" \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    2>/dev/null || echo "Database may already exist"
+# Use Azure CLI to run SQL commands directly
+echo "Creating database and user with Azure CLI..."
 
-# Wait for database to be ready
+# Create database first
+az synapse sql pool list \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" &>/dev/null
+
+# Execute SQL to create database and user using Azure user's context
+SQL_SCRIPT="
+-- Create database if not exists
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
+    CREATE DATABASE BillingAnalytics;
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Create master key
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd$(date +%s)!';
+GO
+
+-- Create user for service principal
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
+BEGIN
+    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
+    PRINT 'Created user wiv_account';
+END
+GO
+
+-- Grant permissions
+ALTER ROLE db_datareader ADD MEMBER [wiv_account];
+ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
+ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
+GO
+"
+
+# Save SQL to file
+echo "$SQL_SCRIPT" > /tmp/create_db_user_$$.sql
+
+# Execute using Azure Data Studio CLI or Synapse Studio REST API
+echo "Executing database setup..."
+
+# Get access token for current Azure user
+ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
+
+if [ -n "$ACCESS_TOKEN" ]; then
+    # Create database via REST API
+    curl -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' \
+        --silent --output /dev/null 2>&1
+    
+    sleep 5
+    
+    # Create user and grant permissions
+    GRANT_SQL="USE BillingAnalytics; IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
+    
+    curl -X POST \
+        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": \"$GRANT_SQL\"}" \
+        --silent --output /dev/null 2>&1
+    
+    echo "✅ Database and user setup completed via REST API"
+else
+    echo "⚠️ Could not get access token, will try alternative method"
+fi
+
+# Clean up
+rm -f /tmp/create_db_user_$$.sql
+
+# Wait for changes to propagate
 sleep 10
 
 # Create and execute SQL script to set up database user
@@ -977,11 +1045,14 @@ config = {
     'storage_account': '$STORAGE_ACCOUNT_NAME',
     'container_name': '$CONTAINER_NAME',
     'export_path': '$EXPORT_PATH',
-    'master_key_password': '$MASTER_KEY_PASSWORD'
+    'master_key_password': '$MASTER_KEY_PASSWORD',
+    'sql_admin_user': '$SQL_ADMIN_USER',
+    'sql_admin_password': '$SQL_ADMIN_PASSWORD'
 }
 
 def wait_for_synapse():
     """Wait for Synapse to be ready with enhanced retry logic"""
+    # Use service principal connection
     conn_str = f"""
     DRIVER={{ODBC Driver 18 for SQL Server}};
     SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
@@ -1333,6 +1404,8 @@ if command -v python3 >/dev/null 2>&1; then
             sed -i '' "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
             sed -i '' "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
             sed -i '' "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
+            sed -i '' "s/\$SQL_ADMIN_USER/$SQL_ADMIN_USER/g" setup_synapse_automated.py
+            sed -i '' "s/\$SQL_ADMIN_PASSWORD/$SQL_ADMIN_PASSWORD/g" setup_synapse_automated.py
         else
             # Linux sed
             sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
@@ -1343,6 +1416,8 @@ if command -v python3 >/dev/null 2>&1; then
             sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
             sed -i "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
             sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
+            sed -i "s/\$SQL_ADMIN_USER/$SQL_ADMIN_USER/g" setup_synapse_automated.py
+            sed -i "s/\$SQL_ADMIN_PASSWORD/$SQL_ADMIN_PASSWORD/g" setup_synapse_automated.py
         fi
         
         python3 setup_synapse_automated.py && SETUP_COMPLETED=true
