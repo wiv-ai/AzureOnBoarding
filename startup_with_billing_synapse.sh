@@ -875,6 +875,28 @@ for retry in range(max_setup_retries):
             else:
                 print(f"⚠️ Master key: {str(e)[:100]}")
         
+        # Create database user for the service principal
+        try:
+            cursor.execute(f"CREATE USER [{config['client_id']}] FROM EXTERNAL PROVIDER")
+            print(f"✅ Database user created for service principal {config['client_id']}")
+        except pyodbc.Error as e:
+            if "already exists" in str(e):
+                print(f"✅ Database user already exists for {config['client_id']}")
+            else:
+                print(f"⚠️ Database user creation: {str(e)[:100]}")
+        
+        # Grant necessary permissions to the service principal
+        try:
+            cursor.execute(f"ALTER ROLE db_datareader ADD MEMBER [{config['client_id']}]")
+            cursor.execute(f"ALTER ROLE db_datawriter ADD MEMBER [{config['client_id']}]")
+            cursor.execute(f"ALTER ROLE db_ddladmin ADD MEMBER [{config['client_id']}]")
+            print("✅ Database permissions granted to service principal")
+        except pyodbc.Error as e:
+            if "already a member" in str(e):
+                print("✅ Service principal already has database permissions")
+            else:
+                print(f"⚠️ Permission grant: {str(e)[:100]}")
+        
         # Drop old view if exists and create improved view
         try:
             cursor.execute("IF EXISTS (SELECT * FROM sys.views WHERE name = 'BillingData') DROP VIEW BillingData")
@@ -1283,6 +1305,16 @@ USE BillingAnalytics;
 GO
 
 CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
+GO
+
+-- Create database user for the service principal
+CREATE USER [$APP_ID] FROM EXTERNAL PROVIDER;
+GO
+
+-- Grant necessary permissions
+ALTER ROLE db_datareader ADD MEMBER [$APP_ID];
+ALTER ROLE db_datawriter ADD MEMBER [$APP_ID];
+ALTER ROLE db_ddladmin ADD MEMBER [$APP_ID];
 GO
 
 -- Improved view that automatically queries only the latest export file
