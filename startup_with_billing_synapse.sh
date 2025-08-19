@@ -804,7 +804,9 @@ az synapse sql-script create \
 
 # Method 2: Use REST API with better error handling
 echo "Method 2: Using REST API with Azure user token..."
-ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+# In Cloud Shell, refresh token if needed
+az account get-access-token --resource https://database.windows.net --query accessToken -o tsv >/dev/null 2>&1 || az login --only-show-errors >/dev/null 2>&1
+ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
 
 if [ -n "$ACCESS_TOKEN" ]; then
     # Create database via REST API
