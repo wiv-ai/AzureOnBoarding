@@ -4,8 +4,211 @@ echo ""
 echo "🚀 Azure Onboarding Script with Billing & Synapse Starting..."
 echo "--------------------------------------"
 
+# ===========================
+# INSTALL REQUIRED TOOLS
+# ===========================
+echo ""
+echo "🔧 Checking and installing required tools..."
+echo "--------------------------------------"
+
+# Function to detect OS
+detect_os() {
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if [ -f /etc/debian_version ]; then
+            echo "debian"
+        elif [ -f /etc/redhat-release ]; then
+            echo "redhat"
+        else
+            echo "linux"
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "macos"
+    else
+        echo "unknown"
+    fi
+}
+
+OS_TYPE=$(detect_os)
+echo "Detected OS: $OS_TYPE"
+
+# Install Azure CLI if not present
+if ! command -v az &> /dev/null; then
+    echo "📦 Installing Azure CLI..."
+    
+    case $OS_TYPE in
+        debian)
+            # Ubuntu/Debian
+            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+            ;;
+        redhat)
+            # RHEL/CentOS/Fedora
+            sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+            echo -e "[azure-cli]
+name=Azure CLI
+baseurl=https://packages.microsoft.com/yumrepos/azure-cli
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.microsoft.com/keys/microsoft.asc" | sudo tee /etc/yum.repos.d/azure-cli.repo
+            sudo yum install -y azure-cli
+            ;;
+        macos)
+            # macOS
+            if command -v brew &> /dev/null; then
+                brew update && brew install azure-cli
+            else
+                echo "❌ Homebrew not found. Please install Homebrew first:"
+                echo "   /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+                exit 1
+            fi
+            ;;
+        *)
+            echo "⚠️ Please install Azure CLI manually: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+            ;;
+    esac
+else
+    echo "✅ Azure CLI is already installed ($(az version --query '"azure-cli"' -o tsv))"
+fi
+
+# Install Python3 and pip if not present
+if ! command -v python3 &> /dev/null; then
+    echo "📦 Installing Python3..."
+    
+    case $OS_TYPE in
+        debian)
+            sudo apt-get update
+            sudo apt-get install -y python3 python3-pip python3-dev
+            ;;
+        redhat)
+            sudo yum install -y python3 python3-pip python3-devel
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install python3
+            fi
+            ;;
+    esac
+else
+    echo "✅ Python3 is already installed ($(python3 --version))"
+fi
+
+# Install ODBC drivers and pyodbc dependencies
+echo "📦 Installing ODBC drivers for SQL Server..."
+
+case $OS_TYPE in
+    debian)
+        # Install ODBC driver dependencies
+        sudo apt-get update
+        sudo apt-get install -y unixodbc-dev
+        
+        # Install Microsoft ODBC Driver 18 for SQL Server
+        if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" &> /dev/null; then
+            curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+            curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+            echo "✅ ODBC Driver 18 for SQL Server installed"
+        else
+            echo "✅ ODBC Driver 18 for SQL Server is already installed"
+        fi
+        ;;
+    redhat)
+        sudo yum install -y unixODBC-devel
+        
+        if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" &> /dev/null; then
+            curl https://packages.microsoft.com/config/rhel/8/prod.repo | sudo tee /etc/yum.repos.d/mssql-release.repo
+            sudo ACCEPT_EULA=Y yum install -y msodbcsql18
+            echo "✅ ODBC Driver 18 for SQL Server installed"
+        else
+            echo "✅ ODBC Driver 18 for SQL Server is already installed"
+        fi
+        ;;
+    macos)
+        if command -v brew &> /dev/null; then
+            brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+            brew update
+            HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install msodbcsql18
+            echo "✅ ODBC Driver 18 for SQL Server installed"
+        fi
+        ;;
+esac
+
+# Install Python packages
+echo "📦 Installing required Python packages..."
+pip3 install --upgrade pip 2>/dev/null || python3 -m pip install --upgrade pip 2>/dev/null
+
+# Install required Python packages
+PYTHON_PACKAGES="pyodbc pandas azure-identity azure-storage-blob requests"
+for package in $PYTHON_PACKAGES; do
+    if ! python3 -c "import ${package%%-*}" 2>/dev/null; then
+        echo "  Installing $package..."
+        pip3 install $package 2>/dev/null || python3 -m pip install $package 2>/dev/null || sudo pip3 install $package 2>/dev/null
+    else
+        echo "  ✅ $package is already installed"
+    fi
+done
+
+# Install jq for JSON parsing (useful for API responses)
+if ! command -v jq &> /dev/null; then
+    echo "📦 Installing jq..."
+    case $OS_TYPE in
+        debian)
+            sudo apt-get install -y jq
+            ;;
+        redhat)
+            sudo yum install -y jq
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install jq
+            fi
+            ;;
+    esac
+else
+    echo "✅ jq is already installed"
+fi
+
+# Install sqlcmd if not present (optional but useful)
+if ! command -v sqlcmd &> /dev/null; then
+    echo "📦 Installing sqlcmd (optional)..."
+    case $OS_TYPE in
+        debian)
+            if ! command -v sqlcmd &> /dev/null; then
+                curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+                curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list
+                sudo apt-get update
+                sudo ACCEPT_EULA=Y apt-get install -y mssql-tools
+                echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+                export PATH="$PATH:/opt/mssql-tools/bin"
+            fi
+            ;;
+        redhat)
+            sudo ACCEPT_EULA=Y yum install -y mssql-tools
+            echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+            export PATH="$PATH:/opt/mssql-tools/bin"
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
+                brew update
+                ACCEPT_EULA=Y brew install mssql-tools
+            fi
+            ;;
+    esac
+fi
+
+echo ""
+echo "✅ All required tools are installed!"
+echo "--------------------------------------"
+
 # Login to Azure (if needed)
-# az login
+# Check if already logged in
+if ! az account show &> /dev/null; then
+    echo ""
+    echo "🔐 Please login to Azure..."
+    az login
+else
+    echo "✅ Already logged in to Azure as: $(az account show --query user.name -o tsv)"
+fi
 
 # Fetch and list all subscriptions
 SUBSCRIPTIONS=$(az account list --query '[].{name:name, id:id}' -o tsv)
