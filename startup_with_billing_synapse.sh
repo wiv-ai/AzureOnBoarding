@@ -1684,14 +1684,14 @@ GO
 CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
 GO
 
--- Create database user for the service principal
-CREATE USER [$APP_ID] FROM EXTERNAL PROVIDER;
+-- Create database user for the service principal (using wiv_account name)
+CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
 GO
 
 -- Grant necessary permissions
-ALTER ROLE db_datareader ADD MEMBER [$APP_ID];
-ALTER ROLE db_datawriter ADD MEMBER [$APP_ID];
-ALTER ROLE db_ddladmin ADD MEMBER [$APP_ID];
+ALTER ROLE db_datareader ADD MEMBER [wiv_account];
+ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
+ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
 GO
 
 -- Improved view that automatically queries only the latest export file
