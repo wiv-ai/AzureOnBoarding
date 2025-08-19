@@ -1322,14 +1322,28 @@ if command -v python3 >/dev/null 2>&1; then
     # Try to run the automated setup
     if python3 -c "import pyodbc" 2>/dev/null; then
         echo "🚀 Running automated Synapse setup..."
-        # Replace variables in Python script
-        sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
-        sed -i "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
-        sed -i "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
-        sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
-        sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
-        sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
-        sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
+        # Replace variables in Python script - handle both macOS and Linux sed
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS sed requires backup extension
+            sed -i '' "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
+            sed -i '' "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
+            sed -i '' "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
+            sed -i '' "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
+            sed -i '' "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
+            sed -i '' "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
+            sed -i '' "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
+            sed -i '' "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
+        else
+            # Linux sed
+            sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
+            sed -i "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
+            sed -i "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
+            sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
+            sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
+            sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
+            sed -i "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
+            sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
+        fi
         
         python3 setup_synapse_automated.py && SETUP_COMPLETED=true
         rm -f setup_synapse_automated.py
