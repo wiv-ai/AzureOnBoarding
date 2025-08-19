@@ -275,9 +275,10 @@ STORAGE_RESOURCE_ID=$(az storage account show \
     --resource-group "$BILLING_RG" \
     --query id -o tsv)
 
-# Create the export using REST API (as CLI doesn't have direct support)
-# Use portable date handling that works on both macOS and Linux
-echo "📅 Setting up billing export date range..."
+# Create the export using REST API with FOCUS format
+# FOCUS (FinOps Open Cost and Usage Specification) provides standardized cost data
+# Settings: Type=FocusCost, Version=1.0, Format=CSV, Overwrite=true (partitionData)
+echo "📅 Setting up FOCUS billing export date range..."
 # Use current date as start (Azure doesn't allow past dates)
 CURRENT_DATE=$(date +%Y-%m-%d)
 CURRENT_YEAR=$(date +%Y)
@@ -290,7 +291,7 @@ END_DATE="${FUTURE_DATE}T00:00:00Z"
 echo "   Export period: $START_DATE to $END_DATE"
 
 EXPORT_RESPONSE=$(az rest --method PUT \
-    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
+    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2023-07-01-preview" \
     --body @- <<EOF 2>&1
 {
   "properties": {
@@ -311,37 +312,16 @@ EXPORT_RESPONSE=$(az rest --method PUT \
       }
     },
     "definition": {
-      "type": "ActualCost",
+      "type": "FocusCost",
       "timeframe": "MonthToDate",
       "dataSet": {
         "granularity": "Daily",
         "configuration": {
-          "columns": [
-            "Date",
-            "ServiceFamily",
-            "MeterCategory",
-            "MeterSubcategory",
-            "MeterName",
-            "ResourceGroup",
-            "ResourceLocation",
-            "ConsumedService",
-            "ResourceId",
-            "ChargeType",
-            "PublisherType",
-            "Quantity",
-            "CostInBillingCurrency",
-            "CostInUSD",
-            "BillingCurrencyCode",
-            "SubscriptionName",
-            "SubscriptionId",
-            "ProductName",
-            "Frequency",
-            "UnitOfMeasure",
-            "Tags"
-          ]
+          "dataVersion": "1.0"
         }
       }
-    }
+    },
+    "partitionData": true
   }
 }
 EOF
@@ -397,29 +377,23 @@ if [[ "$EXPORT_RESPONSE" == *"error"* ]] || [[ "$EXPORT_RESPONSE" == *"BadReques
       }
     },
     "definition": {
-      "type": "ActualCost",
+      "type": "FocusCost",
       "timeframe": "MonthToDate",
       "dataSet": {
         "granularity": "Daily",
         "configuration": {
-          "columns": [
-            "Date", "ServiceFamily", "MeterCategory", "MeterSubcategory",
-            "MeterName", "ResourceGroup", "ResourceLocation", "ConsumedService",
-            "ResourceId", "ChargeType", "PublisherType", "Quantity",
-            "CostInBillingCurrency", "CostInUsd", "BillingCurrencyCode",
-            "SubscriptionName", "SubscriptionId", "ProductName",
-            "Frequency", "UnitOfMeasure", "Tags"
-          ]
+          "dataVersion": "1.0"
         }
       }
-    }
+    },
+    "partitionData": true
   }
 }
 EXPORTJSON
         
         # Retry with JSON file
         RETRY_RESPONSE=$(az rest --method PUT \
-            --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
+            --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2023-07-01-preview" \
             --body @/tmp/export_config_$$.json 2>&1)
         
         rm -f /tmp/export_config_$$.json
@@ -1510,7 +1484,7 @@ echo "   No additional setup needed - serverless SQL pool can query the CSV file
 echo ""
 echo "🔄 Automatically triggering billing export to run immediately..."
 EXPORT_TRIGGER_RESULT=$(az rest --method POST \
-    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2021-10-01" \
+    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2023-07-01-preview" \
     --only-show-errors 2>&1)
 
 if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]] || [[ "$EXPORT_TRIGGER_RESULT" == *"Error"* ]]; then
@@ -1518,10 +1492,11 @@ if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]] || [[ "$EXPORT_TRIGGER_RESULT" ==
     echo "   This is normal if an export is already running"
     echo "   Export will run automatically at midnight UTC daily"
 else
-    echo "✅ Billing export triggered successfully!"
+    echo "✅ FOCUS billing export triggered successfully!"
     echo "   📊 Data will be available in 5-30 minutes at:"
     echo "      Storage: $STORAGE_ACCOUNT_NAME"
     echo "      Container: $CONTAINER_NAME/billing-data/"
+    echo "      Format: FOCUS 1.0 (standardized FinOps format)"
     echo "   ⏰ Future exports will run automatically every day at midnight UTC"
 fi
 
