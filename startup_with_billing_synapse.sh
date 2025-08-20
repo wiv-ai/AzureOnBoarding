@@ -486,14 +486,52 @@ STORAGE_RESOURCE_ID=$(az storage account show \
 # FOCUS (FinOps Open Cost and Usage Specification) provides standardized cost data
 # Settings: Type=FocusCost, Version=1.0, Format=CSV, Overwrite=true (partitionData)
 echo "📅 Setting up FOCUS billing export date range..."
-# Use current date as start (Azure doesn't allow past dates)
-CURRENT_DATE=$(date +%Y-%m-%d)
-CURRENT_YEAR=$(date +%Y)
-FUTURE_YEAR=$((CURRENT_YEAR + 5))
-FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
 
-START_DATE="${CURRENT_DATE}T00:00:00Z"
-END_DATE="${FUTURE_DATE}T00:00:00Z"
+# Allow customization of export period via environment variables
+if [ -n "$BILLING_EXPORT_START_DATE" ] && [ -n "$BILLING_EXPORT_END_DATE" ]; then
+    # Use custom dates if provided
+    START_DATE="${BILLING_EXPORT_START_DATE}T00:00:00Z"
+    END_DATE="${BILLING_EXPORT_END_DATE}T00:00:00Z"
+    echo "   Using custom export period from environment variables"
+else
+    # Ask user if they want to customize the export period
+    echo ""
+    echo "🔹 Configure billing export date range:"
+    echo "   Default: Today to 5 years from now"
+    read -p "   Do you want to customize the export period? (y/n): " CUSTOMIZE_PERIOD
+    
+    if [[ "$CUSTOMIZE_PERIOD" =~ ^[Yy]$ ]]; then
+        # Get custom dates from user
+        echo ""
+        echo "   Enter dates in YYYY-MM-DD format:"
+        read -p "   Start date (e.g., 2024-01-01): " CUSTOM_START
+        read -p "   End date (e.g., 2025-12-31): " CUSTOM_END
+        
+        if [ -n "$CUSTOM_START" ] && [ -n "$CUSTOM_END" ]; then
+            START_DATE="${CUSTOM_START}T00:00:00Z"
+            END_DATE="${CUSTOM_END}T00:00:00Z"
+        else
+            echo "   Invalid dates, using defaults..."
+            # Use default: current date as start (Azure doesn't allow past dates)
+            CURRENT_DATE=$(date +%Y-%m-%d)
+            CURRENT_YEAR=$(date +%Y)
+            FUTURE_YEAR=$((CURRENT_YEAR + 5))
+            FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
+            
+            START_DATE="${CURRENT_DATE}T00:00:00Z"
+            END_DATE="${FUTURE_DATE}T00:00:00Z"
+        fi
+    else
+        # Use default: current date as start (Azure doesn't allow past dates)
+        CURRENT_DATE=$(date +%Y-%m-%d)
+        CURRENT_YEAR=$(date +%Y)
+        FUTURE_YEAR=$((CURRENT_YEAR + 5))
+        FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
+        
+        START_DATE="${CURRENT_DATE}T00:00:00Z"
+        END_DATE="${FUTURE_DATE}T00:00:00Z"
+    fi
+fi
 
 echo "   Export period: $START_DATE to $END_DATE"
 
