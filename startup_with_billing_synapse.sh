@@ -798,10 +798,22 @@ fi
 if [ -n "$ACCESS_TOKEN" ]; then
     echo "   Using authentication: $AUTH_METHOD"
     
-    # Create database - use simple CREATE DATABASE for Synapse serverless
+    # Create database - Try multiple methods for Synapse serverless
     echo "Creating database BillingAnalytics..."
     
-    # Synapse serverless SQL pool uses simple syntax
+    # Method 1: Try using sqlcmd if available
+    if command -v sqlcmd &> /dev/null; then
+        echo "   Trying sqlcmd method..."
+        sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
+               -d master \
+               -G \
+               -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics" \
+               2>/dev/null && echo "✅ Database created via sqlcmd" || echo "   sqlcmd method failed"
+    fi
+    
+    # Method 2: Try REST API with proper error handling
+    echo "   Trying REST API method..."
+    
     # First check if database already exists
     CHECK_DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
@@ -813,7 +825,28 @@ if [ -n "$ACCESS_TOKEN" ]; then
     CHECK_BODY=$(echo "$CHECK_DB_RESPONSE" | grep -v "HTTP_CODE:")
     
     if [[ "$CHECK_HTTP_CODE" == "200" ]] && [[ "$CHECK_BODY" == *"BillingAnalytics"* ]]; then
-        echo "✅ Database BillingAnalytics already exists - skipping creation"
+        echo "✅ Database BillingAnalytics already exists"
+        DATABASE_CREATED=true
+    elif [[ "$CHECK_HTTP_CODE" == "500" ]]; then
+        # HTTP 500 might mean we can't query, try to create anyway
+        echo "   Cannot verify database existence (HTTP 500), attempting creation..."
+        
+        # Try simple CREATE DATABASE
+        DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
+        
+        HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        
+        if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+            echo "✅ Database created successfully"
+            DATABASE_CREATED=true
+        else
+            echo "   REST API method failed (HTTP $HTTP_CODE)"
+            DATABASE_CREATED=false
+        fi
     else
         # Try to create the database
         DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
@@ -823,38 +856,83 @@ if [ -n "$ACCESS_TOKEN" ]; then
             -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
         
         HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-        RESPONSE_BODY=$(echo "$DB_RESPONSE" | grep -v "HTTP_CODE:")
         
         if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
-            echo "✅ Database created successfully (HTTP $HTTP_CODE)"
-        elif [[ "$RESPONSE_BODY" == *"already exists"* ]]; then
-            echo "✅ Database already exists"
+            echo "✅ Database created successfully"
+            DATABASE_CREATED=true
         else
-            echo "⚠️ Database creation returned HTTP $HTTP_CODE"
-            if [[ "$HTTP_CODE" == "500" ]]; then
-                echo "   This might be a transient error or the database might already exist"
-            fi
-            echo "   Full response: ${RESPONSE_BODY:0:500}"
+            echo "   REST API method failed (HTTP $HTTP_CODE)"
+            DATABASE_CREATED=false
         fi
     fi
     
 
     
-    sleep 15  # Increased wait time
+    # If database creation failed, show manual steps
+    if [ "$DATABASE_CREATED" = "false" ]; then
+        echo ""
+        echo "================================================================"
+        echo "⚠️  DATABASE CREATION FAILED - MANUAL STEPS REQUIRED"
+        echo "================================================================"
+        echo ""
+        echo "The database could not be created automatically due to Synapse"
+        echo "serverless SQL pool limitations. Please create it manually:"
+        echo ""
+        echo "1. Open Synapse Studio: https://web.azuresynapse.net"
+        echo "2. Select workspace: $SYNAPSE_WORKSPACE"
+        echo "3. Click 'Develop' (left menu) → 'SQL scripts' → '+ New SQL script'"
+        echo "4. Connect to: 'Built-in' (serverless SQL pool)"
+        echo "5. Copy and run this SQL:"
+        echo ""
+        echo "--------------------------- COPY FROM HERE ---------------------------"
+        echo "CREATE DATABASE BillingAnalytics;"
+        echo "GO"
+        echo ""
+        echo "USE BillingAnalytics;"
+        echo "GO"
+        echo ""
+        echo "CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';"
+        echo "GO"
+        echo ""
+        echo "CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;"
+        echo "GO"
+        echo ""
+        echo "ALTER ROLE db_datareader ADD MEMBER [wiv_account];"
+        echo "ALTER ROLE db_datawriter ADD MEMBER [wiv_account];"
+        echo "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
+        echo "GO"
+        echo ""
+        echo "CREATE OR ALTER VIEW BillingData AS"
+        echo "SELECT * FROM OPENROWSET("
+        echo "    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',"
+        echo "    FORMAT = 'CSV',"
+        echo "    PARSER_VERSION = '2.0',"
+        echo "    HEADER_ROW = TRUE"
+        echo ") AS BillingExport;"
+        echo "GO"
+        echo "--------------------------- COPY TO HERE -----------------------------"
+        echo ""
+        echo "After running the SQL, press Enter to continue..."
+        read -p ""
+        DATABASE_CREATED=true  # Assume user created it manually
+    fi
     
-    # Create master key separately (only if database exists)
-    echo "Creating master key..."
+    sleep 5
     
-    # Check if we can access the database first
-    DB_ACCESS_CHECK=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "SELECT DB_NAME()"}' 2>&1)
-    
-    DB_ACCESS_CODE=$(echo "$DB_ACCESS_CHECK" | grep "HTTP_CODE:" | cut -d: -f2)
-    
-    if [[ "$DB_ACCESS_CODE" == "200" ]]; then
+    # Create master key separately (only if database was created)
+    if [ "$DATABASE_CREATED" = "true" ]; then
+        echo "Creating master key..."
+        
+        # Check if we can access the database first
+        DB_ACCESS_CHECK=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "SELECT DB_NAME()"}' 2>&1)
+        
+        DB_ACCESS_CODE=$(echo "$DB_ACCESS_CHECK" | grep "HTTP_CODE:" | cut -d: -f2)
+        
+        if [[ "$DB_ACCESS_CODE" == "200" ]]; then
         # Database is accessible, try to create master key
         KEY_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
             "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
@@ -868,16 +946,20 @@ if [ -n "$ACCESS_TOKEN" ]; then
         else
             echo "⚠️ Master key creation returned HTTP $KEY_HTTP_CODE (may already exist)"
         fi
+        else
+            echo "⚠️ Cannot access database BillingAnalytics (HTTP $DB_ACCESS_CODE)"
+            echo "   Skipping master key creation"
+        fi
     else
-        echo "⚠️ Cannot access database BillingAnalytics (HTTP $DB_ACCESS_CODE)"
-        echo "   Skipping master key creation"
+        echo "   Skipping master key, user, and view creation (database not created)"
     fi
     
     sleep 5
     
-    # Create user
-    echo "Creating user wiv_account..."
-    USER_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+    # Create user (only if database was created)
+    if [ "$DATABASE_CREATED" = "true" ]; then
+        echo "Creating user wiv_account..."
+        USER_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
@@ -940,8 +1022,10 @@ if [ -n "$ACCESS_TOKEN" ]; then
             echo "❌ View creation failed with both protocols (HTTP $HTTPS_HTTP_CODE)"
         fi
     fi
+    fi  # End of DATABASE_CREATED check
     
-    echo "✅ Database setup completed via REST API"
+    echo ""
+    echo "Database setup process completed"
     
     # Verify what was created
     echo ""
