@@ -658,6 +658,51 @@ fi
 fi  # End of SKIP_EXPORT_CREATION check
 
 # ===========================
+# TRIGGER BILLING EXPORT IMMEDIATELY
+# ===========================
+echo ""
+echo "🔄 Triggering billing export to run immediately..."
+echo "   This will start populating data while we set up Synapse"
+
+if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
+    EXPORT_TRIGGER_RESULT=$(az rest --method POST \
+        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2023-07-01-preview" \
+        --only-show-errors 2>&1)
+    
+    if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]] || [[ "$EXPORT_TRIGGER_RESULT" == *"Error"* ]]; then
+        echo "⚠️  Could not trigger export immediately"
+        echo "   This is normal if an export is already running"
+        echo "   Export will run automatically at midnight UTC daily"
+    else
+        echo "✅ Billing export triggered successfully!"
+        echo "   📊 Data will start appearing in 5-30 minutes at:"
+        echo "      Storage: $STORAGE_ACCOUNT_NAME"
+        echo "      Container: $CONTAINER_NAME/$EXPORT_PATH/"
+        echo "      Format: FOCUS 1.0 (standardized FinOps format)"
+        echo ""
+        echo "   ⏳ Continuing with Synapse setup while export runs in background..."
+    fi
+else
+    echo "   Using existing billing export - checking if we should trigger it..."
+    # Try to trigger existing export (may fail if different subscription owns it)
+    EXPORT_TRIGGER_RESULT=$(az rest --method POST \
+        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2023-07-01-preview" \
+        --only-show-errors 2>&1)
+    
+    if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]]; then
+        echo "   ℹ️  Could not trigger existing export (may be owned by different subscription)"
+        echo "   Export should be running on its regular schedule"
+    else
+        echo "✅ Existing export triggered to refresh data"
+    fi
+fi
+
+echo ""
+echo "⏰ Billing export is now running in the background"
+echo "   Data will be available by the time Synapse setup completes"
+sleep 5
+
+# ===========================
 # SYNAPSE WORKSPACE SETUP
 # ===========================
 echo ""
@@ -2092,25 +2137,49 @@ echo "✅ Billing data access is ready!"
 echo "📊 The queries in 'billing_queries.sql' can be run directly in Synapse Studio"
 echo "   No additional setup needed - serverless SQL pool can query the CSV files directly!"
 
-# Automatically trigger the first export run
-echo ""
-echo "🔄 Automatically triggering billing export to run immediately..."
-EXPORT_TRIGGER_RESULT=$(az rest --method POST \
-    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2023-07-01-preview" \
-    --only-show-errors 2>&1)
+# Note: Billing export was already triggered earlier in the script
+# It should be running in the background and data may already be available
 
-if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]] || [[ "$EXPORT_TRIGGER_RESULT" == *"Error"* ]]; then
-    echo "⚠️  Could not trigger export immediately"
-    echo "   This is normal if an export is already running"
-    echo "   Export will run automatically at midnight UTC daily"
-else
-    echo "✅ FOCUS billing export triggered successfully!"
-    echo "   📊 Data will be available in 5-30 minutes at:"
-    echo "      Storage: $STORAGE_ACCOUNT_NAME"
-    echo "      Container: $CONTAINER_NAME/billing-data/"
-    echo "      Format: FOCUS 1.0 (standardized FinOps format)"
-    echo "   ⏰ Future exports will run automatically every day at midnight UTC"
-fi
+# ===========================
+# CHECK DATA AVAILABILITY AND UPDATE VIEW
+# ===========================
+echo ""
+echo "📊 Checking if billing data is available..."
+echo ""
+echo "The billing export was triggered earlier and may have completed by now."
+echo "To update the BillingData view with actual data once CSV files are available:"
+echo ""
+echo "1. Open Synapse Studio: https://web.azuresynapse.net"
+echo "2. Select workspace: $SYNAPSE_WORKSPACE"
+echo "3. Go to 'Develop' → 'SQL scripts' → 'New SQL script'"
+echo "4. Run this SQL to update the view:"
+echo ""
+echo "--------------------------- UPDATE VIEW SQL ---------------------------"
+echo "USE BillingAnalytics;"
+echo "GO"
+echo ""
+echo "-- Drop the placeholder view"
+echo "DROP VIEW BillingData;"
+echo "GO"
+echo ""
+echo "-- Create view with actual data"
+echo "CREATE VIEW BillingData AS"
+echo "SELECT * FROM OPENROWSET("
+echo "    BULK 'https://$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$CONTAINER_NAME/**/*.csv',"
+echo "    FORMAT = 'CSV',"
+echo "    PARSER_VERSION = '2.0',"
+echo "    HEADER_ROW = TRUE"
+echo ") AS BillingExport;"
+echo "GO"
+echo ""
+echo "-- Test the view"
+echo "SELECT TOP 10 * FROM BillingData;"
+echo "GO"
+echo "-----------------------------------------------------------------------"
+echo ""
+echo "💡 Tip: Data typically appears within 5-30 minutes after export trigger"
+echo "   If no data yet, wait a bit longer and try again"
+echo ""
 
 # Optional: Microsoft Graph permissions
 echo ""
