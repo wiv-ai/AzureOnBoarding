@@ -120,6 +120,11 @@ else
     echo "✅ Already logged in to Azure as: $(az account show --query user.name -o tsv)"
 fi
 
+# Get current user ID early (we'll need this later)
+CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
+CURRENT_USER_NAME=$(az ad signed-in-user show --query userPrincipalName -o tsv 2>/dev/null)
+echo "Current User: $CURRENT_USER_NAME (ID: $CURRENT_USER_ID)"
+
 # Fetch and list all subscriptions
 SUBSCRIPTIONS=$(az account list --query '[].{name:name, id:id}' -o tsv)
 
@@ -348,7 +353,9 @@ if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
       "dataSet": {
         "granularity": "Daily",
         "configuration": {
-          "dataVersion": "1.0"
+          "dataVersion": "1.0",
+          "compressionMode": "None",
+          "overwriteMode": true
         }
       }
     },
@@ -487,25 +494,13 @@ echo "⏳ Waiting for firewall rules to propagate..."
 sleep 30
 
 # ===========================
-# GRANT SYNAPSE PERMISSIONS
+# CRITICAL: GRANT CURRENT USER SYNAPSE ADMIN
 # ===========================
-echo "🔐 Granting Synapse workspace roles..."
+echo ""
+echo "🔐 CRITICAL: Granting Synapse Administrator to current user..."
+echo "   This is required for database creation to work!"
 
-# Grant Synapse roles to service principal
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse Administrator" \
-    --assignee "$SP_OBJECT_ID" \
-    --only-show-errors 2>/dev/null || true
-
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse SQL Administrator" \
-    --assignee "$SP_OBJECT_ID" \
-    --only-show-errors 2>/dev/null || true
-
-# Get current user ID and grant admin role
-CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
+# Grant current user Synapse Administrator (CRITICAL FOR DATABASE CREATION)
 if [ -n "$CURRENT_USER_ID" ]; then
     az synapse role assignment create \
         --workspace-name "$SYNAPSE_WORKSPACE" \
@@ -518,10 +513,26 @@ if [ -n "$CURRENT_USER_ID" ]; then
         --role "Synapse SQL Administrator" \
         --assignee "$CURRENT_USER_ID" \
         --only-show-errors 2>/dev/null || true
+    
+    echo "   ✅ Current user ($CURRENT_USER_NAME) is now Synapse Administrator"
 fi
 
+# Grant to service principal as well
+echo "🔐 Granting Synapse roles to service principal..."
+az synapse role assignment create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --role "Synapse Administrator" \
+    --assignee "$SP_OBJECT_ID" \
+    --only-show-errors 2>/dev/null || true
+
+az synapse role assignment create \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --role "Synapse SQL Administrator" \
+    --assignee "$SP_OBJECT_ID" \
+    --only-show-errors 2>/dev/null || true
+
 # ===========================
-# GRANT STORAGE PERMISSIONS TO SYNAPSE
+# GRANT STORAGE PERMISSIONS
 # ===========================
 echo ""
 echo "🔐 Configuring storage access permissions..."
@@ -565,102 +576,23 @@ if [ -n "$CURRENT_USER_ID" ]; then
 fi
 
 # ===========================
-# ENHANCED WAIT FOR SYNAPSE WITH VERIFICATION
+# WAIT FOR SYNAPSE AND PERMISSIONS
 # ===========================
 echo ""
-echo "⏳ Waiting for Synapse SQL pools to be fully initialized..."
-echo "   This is CRITICAL - Synapse needs 5-10 minutes to be ready"
-echo ""
-
-# Function to test Synapse connectivity
-test_synapse_ready() {
-    local test_token=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-    
-    if [ -z "$test_token" ]; then
-        return 1
-    fi
-    
-    local test_response=$(curl -s -w "\n##HTTP_STATUS##%{http_code}" -X POST \
-        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-        -H "Authorization: Bearer $test_token" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "SELECT 1 as test"}' 2>&1)
-    
-    local http_status=$(echo "$test_response" | grep -o "##HTTP_STATUS##.*" | cut -d'#' -f5)
-    
-    if [[ "$http_status" == "200" ]]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Wait loop with verification
-MAX_WAIT=10
-WAIT_COUNT=0
-
-while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
-    WAIT_COUNT=$((WAIT_COUNT + 1))
-    echo "   Checking Synapse readiness (attempt $WAIT_COUNT/$MAX_WAIT)..."
-    
-    if test_synapse_ready; then
-        echo "   ✅ Synapse is ready!"
-        break
-    else
-        if [ $WAIT_COUNT -lt $MAX_WAIT ]; then
-            echo "   Not ready yet. Waiting 60 seconds..."
-            sleep 60
-        else
-            echo "   ⚠️  Synapse may not be fully ready. Proceeding anyway..."
-        fi
-    fi
-done
-
-# Additional wait for good measure
-echo "   Final 30-second wait for all services..."
-sleep 30
+echo "⏳ Waiting for Synapse and permissions to be ready..."
+echo "   Synapse SQL pools need time to initialize..."
+sleep 60
+echo "   Permissions need time to propagate..."
+sleep 60
 
 # ===========================
-# DATABASE AND VIEW CREATION WITH ROBUST ERROR HANDLING
+# DATABASE AND VIEW CREATION
 # ===========================
 echo ""
-echo "🔧 Creating BillingAnalytics database and configuring permissions..."
+echo "🔧 Creating BillingAnalytics database..."
 echo "--------------------------------------"
 
-# Function to execute SQL with enhanced error handling
-execute_sql_safe() {
-    local database=$1
-    local query=$2
-    local description=$3
-    local token=$4
-    
-    echo "  $description..."
-    
-    # Properly escape the query for JSON
-    local json_query=$(echo -n "$query" | jq -Rs .)
-    
-    local response=$(curl -s -w "\n##HTTP_STATUS##%{http_code}" -X POST \
-        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/${database}/query" \
-        -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": $json_query}" 2>&1)
-    
-    local http_status=$(echo "$response" | grep -o "##HTTP_STATUS##.*" | cut -d'#' -f5)
-    local body=$(echo "$response" | sed '/##HTTP_STATUS##/d')
-    
-    if [[ "$http_status" == "200" ]] || [[ "$http_status" == "201" ]] || [[ "$http_status" == "202" ]]; then
-        echo "    ✅ Success"
-        return 0
-    elif [[ "$body" == *"already exists"* ]] || [[ "$body" == *"already a member"* ]]; then
-        echo "    ℹ️  Already exists"
-        return 0
-    else
-        echo "    ⚠️  Failed (HTTP $http_status)"
-        return 1
-    fi
-}
-
-# Get fresh token for database creation
+# Get Azure access token
 ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
 
 DATABASE_CREATED=false
@@ -668,396 +600,255 @@ DATABASE_CREATED=false
 if [ -n "$ACCESS_TOKEN" ]; then
     echo "✅ Got Azure CLI access token"
     
-    # Create database with retries
-    echo ""
-    echo "  Step 1: Creating database..."
-    RETRY=0
-    while [ $RETRY -lt 3 ]; do
-        if execute_sql_safe "master" \
-            "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics" \
-            "Creating database (attempt $((RETRY+1)))" \
-            "$ACCESS_TOKEN"; then
-            break
+    # Function to execute SQL
+    execute_sql() {
+        local database=$1
+        local query=$2
+        local description=$3
+        
+        echo "  $description..."
+        
+        local json_query=$(echo -n "$query" | jq -Rs .)
+        
+        local response=$(curl -s -w "\n##HTTP_STATUS##%{http_code}" -X POST \
+            "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/${database}/query" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": $json_query}" 2>&1)
+        
+        local http_status=$(echo "$response" | grep -o "##HTTP_STATUS##.*" | cut -d'#' -f5)
+        
+        if [[ "$http_status" == "200" ]] || [[ "$http_status" == "201" ]] || [[ "$http_status" == "202" ]]; then
+            echo "    ✅ Success"
+            return 0
+        else
+            echo "    ⚠️  Failed (HTTP $http_status)"
+            return 1
         fi
-        RETRY=$((RETRY+1))
-        [ $RETRY -lt 3 ] && sleep 10
-    done
+    }
+    
+    # Create database
+    execute_sql "master" \
+        "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics" \
+        "Creating database BillingAnalytics"
     
     sleep 5
     
     # Create master key
-    echo "  Step 2: Creating master key..."
     MASTER_KEY_PASSWORD="StrongP@ssw0rd$(date +%s | tail -c 4)!"
-    execute_sql_safe "BillingAnalytics" \
+    execute_sql "BillingAnalytics" \
         "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD'" \
-        "Creating master key" \
-        "$ACCESS_TOKEN"
+        "Creating master key"
     
     sleep 3
     
     # Create credential
-    echo "  Step 3: Creating database scoped credential..."
-    execute_sql_safe "BillingAnalytics" \
+    execute_sql "BillingAnalytics" \
         "IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity') CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity WITH IDENTITY = 'Managed Identity'" \
-        "Creating credential" \
-        "$ACCESS_TOKEN"
+        "Creating credential"
     
     sleep 3
     
     # Create external data source
-    echo "  Step 4: Creating external data source..."
-    execute_sql_safe "BillingAnalytics" \
+    execute_sql "BillingAnalytics" \
         "IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
-        "Creating data source" \
-        "$ACCESS_TOKEN"
+        "Creating data source"
     
     sleep 3
     
-    # Create user
-    echo "  Step 5: Creating user for service principal..."
-    execute_sql_safe "BillingAnalytics" \
+    # Create user for service principal
+    execute_sql "BillingAnalytics" \
         "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER" \
-        "Creating user" \
-        "$ACCESS_TOKEN"
+        "Creating user wiv_account"
     
     sleep 3
     
     # Grant permissions
-    echo "  Step 6: Granting permissions..."
-    execute_sql_safe "BillingAnalytics" \
+    execute_sql "BillingAnalytics" \
         "ALTER ROLE db_datareader ADD MEMBER [wiv_account]" \
-        "Granting db_datareader" \
-        "$ACCESS_TOKEN"
+        "Granting db_datareader"
     
-    execute_sql_safe "BillingAnalytics" \
+    execute_sql "BillingAnalytics" \
         "ALTER ROLE db_datawriter ADD MEMBER [wiv_account]" \
-        "Granting db_datawriter" \
-        "$ACCESS_TOKEN"
+        "Granting db_datawriter"
     
-    execute_sql_safe "BillingAnalytics" \
+    execute_sql "BillingAnalytics" \
         "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]" \
-        "Granting db_ddladmin" \
-        "$ACCESS_TOKEN"
+        "Granting db_ddladmin"
     
     sleep 3
     
-    # Create view - flexible approach
-    echo "  Step 7: Creating billing data view..."
+    # Create view - ALWAYS create placeholder first since no files exist yet
+    echo "  Creating placeholder view (billing files not ready yet)..."
     
-    # First drop any existing view
-    execute_sql_safe "BillingAnalytics" \
+    # Drop existing view
+    execute_sql "BillingAnalytics" \
         "IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData" \
-        "Dropping existing view" \
-        "$ACCESS_TOKEN"
+        "Dropping existing view"
     
-    # Try to detect actual file path
-    STORAGE_KEY=$(az storage account keys list \
-        --resource-group "$STORAGE_RG" \
-        --account-name "$STORAGE_ACCOUNT_NAME" \
-        --query '[0].value' -o tsv 2>/dev/null)
-    
-    VIEW_CREATED=false
-    
-    if [ -n "$STORAGE_KEY" ]; then
-        # Check if files exist
-        CSV_COUNT=$(az storage blob list \
-            --container-name "$CONTAINER_NAME" \
-            --account-name "$STORAGE_ACCOUNT_NAME" \
-            --account-key "$STORAGE_KEY" \
-            --prefix "$EXPORT_PATH/DailyBillingExport" \
-            --query "length([?ends_with(name, '.csv')])" -o tsv 2>/dev/null || echo "0")
-        
-        if [ "$CSV_COUNT" -gt 0 ]; then
-            echo "    Found $CSV_COUNT CSV files"
-            
-            # Get first file to determine path pattern
-            FIRST_FILE=$(az storage blob list \
-                --container-name "$CONTAINER_NAME" \
-                --account-name "$STORAGE_ACCOUNT_NAME" \
-                --account-key "$STORAGE_KEY" \
-                --prefix "$EXPORT_PATH/DailyBillingExport" \
-                --query "[?ends_with(name, '.csv')].name | [0]" -o tsv 2>/dev/null)
-            
-            if [[ "$FIRST_FILE" =~ ([0-9]{8}-[0-9]{8}) ]]; then
-                DATE_RANGE="${BASH_REMATCH[1]}"
-                echo "    Using specific date range: $DATE_RANGE"
-                
-                VIEW_SQL="CREATE VIEW BillingData AS
-SELECT *
-FROM OPENROWSET(
-    BULK '${EXPORT_PATH}/DailyBillingExport/${DATE_RANGE}/*/*.csv',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    HEADER_ROW = TRUE
-) AS BillingExport"
-            else
-                # Use wildcard pattern
-                VIEW_SQL="CREATE VIEW BillingData AS
-SELECT *
-FROM OPENROWSET(
-    BULK '${EXPORT_PATH}/DailyBillingExport/*/*/*.csv',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    HEADER_ROW = TRUE
-) AS BillingExport"
-            fi
-            
-            if execute_sql_safe "BillingAnalytics" "$VIEW_SQL" "Creating view with data path" "$ACCESS_TOKEN"; then
-                VIEW_CREATED=true
-                DATABASE_CREATED=true
-            fi
-        fi
-    fi
-    
-    # If no files or view creation failed, create placeholder
-    if [ "$VIEW_CREATED" = "false" ]; then
-        echo "    Creating placeholder view (no data files yet)..."
-        
-        PLACEHOLDER_SQL="CREATE VIEW BillingData AS
+    # Create placeholder view that won't fail
+    PLACEHOLDER_SQL="CREATE VIEW BillingData AS
 SELECT 
     'No billing data available yet' AS Status,
-    'Waiting for export to complete' AS Message,
+    'Billing export will run at midnight UTC or was triggered earlier' AS Message,
     '${STORAGE_ACCOUNT_NAME}' AS StorageAccount,
     '${CONTAINER_NAME}' AS Container,
-    '${EXPORT_PATH}/DailyBillingExport' AS ExpectedPath,
+    '${EXPORT_PATH}/DailyBillingExport/YYYYMMDD-YYYYMMDD/GUID/*.csv' AS ExpectedPattern,
+    'Run update_billing_view.sql once files exist' AS NextStep,
     GETDATE() AS CheckedAt"
-        
-        if execute_sql_safe "BillingAnalytics" "$PLACEHOLDER_SQL" "Creating placeholder view" "$ACCESS_TOKEN"; then
-            DATABASE_CREATED=true
-            echo "    ✅ Placeholder view created"
-        fi
-    fi
     
-    if [ "$DATABASE_CREATED" = "true" ]; then
-        echo ""
-        echo "✅ Database setup completed!"
+    if execute_sql "BillingAnalytics" "$PLACEHOLDER_SQL" "Creating placeholder view"; then
+        DATABASE_CREATED=true
+        echo "    ✅ Placeholder view created"
     fi
-else
-    echo "❌ Failed to get access token"
 fi
 
 # ===========================
-# CREATE MANUAL SETUP SCRIPTS
+# CREATE UPDATE SCRIPTS
 # ===========================
 
-# Create comprehensive manual SQL script
-cat > synapse_billing_setup.sql <<EOF
+# Create script to update view when data is available
+cat > update_billing_view.sql <<EOF
 -- ========================================================
--- COMPLETE SYNAPSE BILLING SETUP (MANUAL)
+-- UPDATE BILLING VIEW WHEN DATA IS AVAILABLE
 -- ========================================================
--- Run this entire script in Synapse Studio if automated setup failed
--- Connect to: Built-in serverless SQL pool
+-- Run this after billing export creates files
 
--- Configuration Values:
--- Workspace: $SYNAPSE_WORKSPACE
--- Storage: $STORAGE_ACCOUNT_NAME
--- Container: $CONTAINER_NAME
--- Path: $EXPORT_PATH
-
--- ========================================================
--- PART 1: DATABASE AND SECURITY SETUP
--- ========================================================
-
--- Create database
-IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
-BEGIN
-    CREATE DATABASE BillingAnalytics;
-    PRINT 'Database created';
-END
-ELSE
-BEGIN
-    PRINT 'Database already exists';
-END
-GO
-
--- Switch to the database
 USE BillingAnalytics;
 GO
 
--- Create master key (required for credentials)
-IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-BEGIN
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';
-    PRINT 'Master key created';
-END
-ELSE
-BEGIN
-    PRINT 'Master key already exists';
-END
+-- First, check what files exist
+SELECT TOP 10
+    r.filepath() as FilePath
+FROM OPENROWSET(
+    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*/*.csv',
+    DATA_SOURCE = 'BillingStorage',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    HEADER_ROW = TRUE
+) AS r;
 GO
 
--- ========================================================
--- PART 2: MANAGED IDENTITY SETUP
--- ========================================================
+-- Drop existing view
+IF OBJECT_ID('BillingData', 'V') IS NOT NULL
+    DROP VIEW BillingData;
+GO
 
--- Create credential for Managed Identity
+-- Create view with proper path
+-- Update the date range (YYYYMMDD-YYYYMMDD) based on actual files
+CREATE VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*/*.csv',
+    DATA_SOURCE = 'BillingStorage',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    HEADER_ROW = TRUE
+) WITH (
+    -- Define schema to avoid errors
+    BillingAccountId VARCHAR(256),
+    BillingAccountName VARCHAR(256),
+    BillingCurrency VARCHAR(16),
+    ChargeType VARCHAR(64),
+    ConsumedService VARCHAR(256),
+    CostInBillingCurrency VARCHAR(50),
+    CostInUsd VARCHAR(50),
+    [Date] VARCHAR(50),
+    EffectiveCost VARCHAR(50),
+    Frequency VARCHAR(64),
+    ListCost VARCHAR(50),
+    MeterCategory VARCHAR(256),
+    MeterName VARCHAR(512),
+    MeterSubCategory VARCHAR(256),
+    PayGPrice VARCHAR(50),
+    ProductName VARCHAR(512),
+    PublisherType VARCHAR(64),
+    Quantity VARCHAR(50),
+    ResourceGroupName VARCHAR(256),
+    ResourceId VARCHAR(512),
+    ResourceLocation VARCHAR(256),
+    ResourceName VARCHAR(512),
+    ServiceFamily VARCHAR(256),
+    ServiceName VARCHAR(256),
+    SubscriptionId VARCHAR(256),
+    SubscriptionName VARCHAR(256),
+    Tags VARCHAR(4000),
+    UnitOfMeasure VARCHAR(64)
+) AS BillingExport;
+GO
+
+-- Test the view
+SELECT TOP 10 * FROM BillingData;
+GO
+EOF
+
+# Create manual setup script
+cat > synapse_billing_setup.sql <<EOF
+-- ========================================================
+-- COMPLETE SYNAPSE SETUP (MANUAL)
+-- ========================================================
+-- Run this in Synapse Studio if automated setup failed
+
+-- Create database
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
+    CREATE DATABASE BillingAnalytics;
+GO
+
+USE BillingAnalytics;
+GO
+
+-- Create master key
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';
+GO
+
+-- Create credential
 IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity')
-BEGIN
     CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity 
     WITH IDENTITY = 'Managed Identity';
-    PRINT 'Credential created';
-END
-ELSE
-BEGIN
-    PRINT 'Credential already exists';
-END
 GO
 
 -- Create external data source
 IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage')
-BEGIN
     CREATE EXTERNAL DATA SOURCE BillingStorage
     WITH (
         LOCATION = 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/',
         CREDENTIAL = WorkspaceIdentity
     );
-    PRINT 'External data source created';
-END
-ELSE
-BEGIN
-    PRINT 'External data source already exists';
-END
 GO
-
--- ========================================================
--- PART 3: USER AND PERMISSIONS
--- ========================================================
 
 -- Create user for service principal
 IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
-BEGIN
     CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
-    PRINT 'User wiv_account created';
-END
-ELSE
-BEGIN
-    PRINT 'User already exists';
-END
 GO
 
 -- Grant permissions
 ALTER ROLE db_datareader ADD MEMBER [wiv_account];
 ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
 ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
-PRINT 'Permissions granted';
 GO
 
--- ========================================================
--- PART 4: CREATE BILLING VIEW
--- ========================================================
-
--- Drop existing view
+-- Create placeholder view (since no files exist yet)
 IF OBJECT_ID('BillingData', 'V') IS NOT NULL
-BEGIN
     DROP VIEW BillingData;
-    PRINT 'Existing view dropped';
-END
 GO
 
--- Create view for billing data
--- NOTE: You may need to adjust the path pattern based on your actual file structure
--- Common patterns:
--- Pattern 1: billing-data/DailyBillingExport/YYYYMMDD-YYYYMMDD/GUID/*.csv
--- Pattern 2: billing-data/DailyBillingExport/*/*/*.csv
--- Pattern 3: billing-data/*.csv
-
--- Try this first (three-level pattern):
 CREATE VIEW BillingData AS
-SELECT *
-FROM OPENROWSET(
-    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*.csv',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    HEADER_ROW = TRUE
-) AS BillingExport;
-GO
-
-PRINT 'View created successfully';
-GO
-
--- ========================================================
--- PART 5: VERIFY SETUP
--- ========================================================
-
--- Test the view
-SELECT TOP 10 * FROM BillingData;
-GO
-
--- If the above fails with "no files found", try these diagnostics:
-
--- Check what files exist (this will show the actual path structure):
-/*
-SELECT TOP 10
-    r.filepath() as FilePath
-FROM OPENROWSET(
-    BULK '$EXPORT_PATH/**.csv',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    HEADER_ROW = TRUE
-) AS r;
-*/
-
--- Once you know the exact path, recreate the view with the correct pattern
-EOF
-
-echo "✅ Manual SQL script saved to: synapse_billing_setup.sql"
-
-# Create troubleshooting script
-cat > troubleshoot_synapse.sql <<EOF
--- ========================================================
--- SYNAPSE TROUBLESHOOTING QUERIES
--- ========================================================
-
-USE BillingAnalytics;
-GO
-
--- 1. Check database exists
-SELECT name, state_desc FROM sys.databases WHERE name = 'BillingAnalytics';
-GO
-
--- 2. Check credentials
-SELECT name, credential_identity FROM sys.database_scoped_credentials;
-GO
-
--- 3. Check external data sources
-SELECT name, location FROM sys.external_data_sources;
-GO
-
--- 4. Check users
-SELECT name, type_desc, authentication_type_desc 
-FROM sys.database_principals 
-WHERE name = 'wiv_account';
-GO
-
--- 5. Check permissions
 SELECT 
-    p.name AS principal_name,
-    p.type_desc AS principal_type,
-    r.name AS role_name
-FROM sys.database_role_members rm
-JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
-JOIN sys.database_principals p ON rm.member_principal_id = p.principal_id
-WHERE p.name = 'wiv_account';
+    'No billing data available yet' AS Status,
+    'Waiting for billing export to complete' AS Message,
+    '$STORAGE_ACCOUNT_NAME' AS StorageAccount,
+    '$CONTAINER_NAME' AS Container,
+    GETDATE() AS CheckedAt;
 GO
 
--- 6. Try to list files (adjust path as needed)
-SELECT TOP 5
-    r.filepath() as FilePath
-FROM OPENROWSET(
-    BULK '**.csv',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    HEADER_ROW = TRUE
-) AS r;
+-- Set database collation to UTF8
+ALTER DATABASE BillingAnalytics 
+COLLATE Latin1_General_100_CI_AS_SC_UTF8;
+
+SELECT * FROM BillingData;
 GO
 EOF
-
-echo "✅ Troubleshooting script saved to: troubleshoot_synapse.sql"
 
 # Create Python configuration
 cat > synapse_config.py <<EOF
@@ -1099,27 +890,34 @@ echo "   Workspace:        $SYNAPSE_WORKSPACE"
 echo "   Endpoint:         ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
 echo "   Database:         BillingAnalytics"
 echo ""
+echo "👤 Current User:"
+echo "   Name:             $CURRENT_USER_NAME"
+echo "   Synapse Role:     Administrator ✅"
+echo ""
 
 if [ "$DATABASE_CREATED" = "true" ]; then
-    echo "✅ Status: DATABASE CREATED SUCCESSFULLY"
+    echo "✅ Status: DATABASE AND PLACEHOLDER VIEW CREATED"
     echo ""
-    echo "📝 Test your setup:"
-    echo "   1. Open: https://web.azuresynapse.net"
-    echo "   2. Run: SELECT * FROM BillingAnalytics.dbo.BillingData"
+    echo "📝 Next Steps:"
+    echo "   1. Wait for billing export to create files (5-30 min)"
+    echo "   2. Open Synapse Studio: https://web.azuresynapse.net"
+    echo "   3. Once files exist, run: update_billing_view.sql"
 else
-    echo "⚠️  Status: MANUAL DATABASE SETUP REQUIRED"
+    echo "⚠️  Status: MANUAL SETUP REQUIRED"
     echo ""
     echo "📝 Complete manually:"
     echo "   1. Open: https://web.azuresynapse.net"
-    echo "   2. New SQL Script → Connect to Built-in pool"
-    echo "   3. Run: synapse_billing_setup.sql"
+    echo "   2. Run: synapse_billing_setup.sql"
 fi
 
 echo ""
 echo "📊 Generated Files:"
-echo "   synapse_billing_setup.sql - Complete manual setup"
-echo "   troubleshoot_synapse.sql  - Diagnostic queries"
-echo "   synapse_config.py         - Python configuration"
+echo "   update_billing_view.sql  - Run this after billing files exist"
+echo "   synapse_billing_setup.sql - Manual setup if needed"
+echo "   synapse_config.py        - Python configuration"
 echo ""
-echo "🔐 Authentication: Managed Identity (No SAS tokens)"
+echo "⚠️  Important: Billing files don't exist yet!"
+echo "   The view currently returns a placeholder message."
+echo "   Once files are created, update the view using update_billing_view.sql"
+echo ""
 echo "============================================================"
