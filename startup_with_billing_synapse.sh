@@ -772,58 +772,90 @@ if [ -n "$ACCESS_TOKEN" ]; then
     
     # Create database - use CREATE instead of IF NOT EXISTS for clearer error
     echo "Creating database BillingAnalytics..."
-    DB_RESPONSE=$(curl -s -X POST \
+    DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
     
-    if [[ "$DB_RESPONSE" == *"already exists"* ]]; then
+    HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    RESPONSE_BODY=$(echo "$DB_RESPONSE" | grep -v "HTTP_CODE:")
+    
+    if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+        echo "✅ Database created successfully (HTTP $HTTP_CODE)"
+    elif [[ "$RESPONSE_BODY" == *"already exists"* ]]; then
         echo "✅ Database already exists"
-    elif [[ "$DB_RESPONSE" == *"error"* ]]; then
-        echo "⚠️ Database creation error, trying IF NOT EXISTS..."
-        curl -s -X POST \
+    else
+        echo "❌ Database creation failed (HTTP $HTTP_CODE)"
+        echo "   Response: ${RESPONSE_BODY:0:200}"
+        echo "   Trying alternative method..."
+        
+        # Try with IF NOT EXISTS
+        ALT_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
             "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' \
-            -o /dev/null
-    else
-        echo "✅ Database created"
+            -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
+        
+        ALT_HTTP_CODE=$(echo "$ALT_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        if [[ "$ALT_HTTP_CODE" == "200" ]] || [[ "$ALT_HTTP_CODE" == "201" ]] || [[ "$ALT_HTTP_CODE" == "202" ]]; then
+            echo "✅ Database created with IF NOT EXISTS (HTTP $ALT_HTTP_CODE)"
+        else
+            echo "❌ Alternative method also failed (HTTP $ALT_HTTP_CODE)"
+            echo "   Database creation requires manual intervention"
+        fi
     fi
     
     sleep 15  # Increased wait time
     
     # Create master key separately
     echo "Creating master key..."
-    curl -s -X POST \
+    KEY_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' \
-        -o /dev/null
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' 2>&1)
+    
+    KEY_HTTP_CODE=$(echo "$KEY_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    if [[ "$KEY_HTTP_CODE" == "200" ]] || [[ "$KEY_HTTP_CODE" == "201" ]] || [[ "$KEY_HTTP_CODE" == "202" ]]; then
+        echo "✅ Master key created (HTTP $KEY_HTTP_CODE)"
+    else
+        echo "❌ Master key creation failed (HTTP $KEY_HTTP_CODE)"
+    fi
     
     sleep 5
     
     # Create user
     echo "Creating user wiv_account..."
-    curl -s -X POST \
+    USER_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '\''wiv_account'\'') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}' \
-        -o /dev/null
+        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '\''wiv_account'\'') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}' 2>&1)
+    
+    USER_HTTP_CODE=$(echo "$USER_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    if [[ "$USER_HTTP_CODE" == "200" ]] || [[ "$USER_HTTP_CODE" == "201" ]] || [[ "$USER_HTTP_CODE" == "202" ]]; then
+        echo "✅ User created (HTTP $USER_HTTP_CODE)"
+    else
+        echo "❌ User creation failed (HTTP $USER_HTTP_CODE)"
+    fi
     
     sleep 5
     
     # Grant permissions
     echo "Granting permissions..."
-    curl -s -X POST \
+    PERM_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}' \
-        -o /dev/null
+        -d '{"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}' 2>&1)
+    
+    PERM_HTTP_CODE=$(echo "$PERM_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    if [[ "$PERM_HTTP_CODE" == "200" ]] || [[ "$PERM_HTTP_CODE" == "201" ]] || [[ "$PERM_HTTP_CODE" == "202" ]]; then
+        echo "✅ Permissions granted (HTTP $PERM_HTTP_CODE)"
+    else
+        echo "❌ Permission grant failed (HTTP $PERM_HTTP_CODE)"
+    fi
     
     sleep 5
     
@@ -831,21 +863,32 @@ if [ -n "$ACCESS_TOKEN" ]; then
     echo "Creating BillingData view..."
     VIEW_SQL="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
     
-    VIEW_RESPONSE=$(curl -s -X POST \
+    VIEW_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         -d "{\"query\": \"$VIEW_SQL\"}" 2>&1)
     
-    if [[ "$VIEW_RESPONSE" == *"error"* ]]; then
-        echo "Trying https protocol for view..."
+    VIEW_HTTP_CODE=$(echo "$VIEW_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    if [[ "$VIEW_HTTP_CODE" == "200" ]] || [[ "$VIEW_HTTP_CODE" == "201" ]] || [[ "$VIEW_HTTP_CODE" == "202" ]]; then
+        echo "✅ View created (HTTP $VIEW_HTTP_CODE)"
+    else
+        echo "❌ View creation failed (HTTP $VIEW_HTTP_CODE)"
+        echo "   Trying https protocol for view..."
         VIEW_SQL_HTTPS="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
-        curl -s -X POST \
+        
+        HTTPS_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
             "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"query\": \"$VIEW_SQL_HTTPS\"}" \
-            -o /dev/null
+            -d "{\"query\": \"$VIEW_SQL_HTTPS\"}" 2>&1)
+        
+        HTTPS_HTTP_CODE=$(echo "$HTTPS_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        if [[ "$HTTPS_HTTP_CODE" == "200" ]] || [[ "$HTTPS_HTTP_CODE" == "201" ]] || [[ "$HTTPS_HTTP_CODE" == "202" ]]; then
+            echo "✅ View created with HTTPS protocol (HTTP $HTTPS_HTTP_CODE)"
+        else
+            echo "❌ View creation failed with both protocols (HTTP $HTTPS_HTTP_CODE)"
+        fi
     fi
     
     echo "✅ Database setup completed via REST API"
