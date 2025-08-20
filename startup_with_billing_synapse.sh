@@ -755,7 +755,8 @@ az synapse role assignment create \
     --only-show-errors 2>/dev/null || echo "  Synapse SQL Administrator role may already exist"
 
 # Wait for role assignments to propagate
-sleep 10
+echo "⏳ Waiting for Synapse role assignments to propagate (30 seconds)..."
+sleep 30
 
 # Create database and grant permissions using Azure CLI
 echo ""
@@ -764,11 +765,31 @@ echo "🔧 Creating BillingAnalytics database and configuring permissions..."
 # Direct REST API approach optimized for Cloud Shell
 echo "Setting up database using REST API (optimized for Cloud Shell)..."
 
-# Get token - Cloud Shell is already authenticated
-ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+# Try service principal authentication first, then fall back to Azure CLI
+echo "Getting authentication token..."
+
+# Method 1: Try service principal token
+SP_TOKEN_RESPONSE=$(curl -s -X POST \
+    "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "client_id=$APP_ID&client_secret=$CLIENT_SECRET&scope=https://database.windows.net/.default&grant_type=client_credentials" 2>/dev/null)
+
+if [[ "$SP_TOKEN_RESPONSE" == *"access_token"* ]]; then
+    ACCESS_TOKEN=$(echo "$SP_TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
+    echo "✅ Got service principal access token"
+    AUTH_METHOD="ServicePrincipal"
+else
+    # Method 2: Fall back to Azure CLI token (Cloud Shell user)
+    echo "   Service principal auth failed, trying Azure CLI..."
+    ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+    if [ -n "$ACCESS_TOKEN" ]; then
+        echo "✅ Got Azure CLI access token"
+        AUTH_METHOD="AzureCLI"
+    fi
+fi
 
 if [ -n "$ACCESS_TOKEN" ]; then
-    echo "✅ Got access token"
+    echo "   Using authentication: $AUTH_METHOD"
     
     # Create database - use CREATE instead of IF NOT EXISTS for clearer error
     echo "Creating database BillingAnalytics..."
