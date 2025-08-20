@@ -200,7 +200,7 @@ sql_commands = [
     CREATE VIEW BillingData AS
     SELECT *
     FROM OPENROWSET(
-        BULK 'https://{STORAGE_ACCOUNT}.blob.core.windows.net/{CONTAINER}/daily/wiv-focus-cost/*/*/*.csv',
+        BULK 'https://billingstorage81150.dfs.core.windows.net/billing-exports/billing-data/DailyBillingExport/*/*/*.csv',
         FORMAT = 'CSV',
         PARSER_VERSION = '2.0',
         HEADER_ROW = TRUE
