@@ -222,6 +222,9 @@ echo "$SUBSCRIPTIONS"
 read -p "🔹 Enter the Subscription ID to use for creating the application: " APP_SUBSCRIPTION_ID
 az account set --subscription "$APP_SUBSCRIPTION_ID"
 
+# Set SUBSCRIPTION_ID variable for later use
+SUBSCRIPTION_ID="$APP_SUBSCRIPTION_ID"
+
 # Get Tenant ID
 TENANT_ID=$(az account show --query tenantId -o tsv)
 echo "Tenant ID: $TENANT_ID"
@@ -390,6 +393,7 @@ fi
 
 # Use fixed resource group name for Synapse resources
 BILLING_RG="rg-wiv"
+STORAGE_RG="$BILLING_RG"  # Use same resource group for storage
 
 # Only create new storage if not using existing
 if [ "$USE_EXISTING_STORAGE" = "false" ]; then
@@ -1328,178 +1332,13 @@ if [ "$SETUP_COMPLETED" = "false" ]; then
     echo "   3. Run the SQL from: synapse_billing_setup.sql"
 fi
 
-# Create backup SQL script for manual execution
-cat > synapse_billing_setup.sql <<EOF
--- ========================================================
--- SYNAPSE BILLING DATA SETUP (Manual Backup)
--- ========================================================
--- Run this in Synapse Studio if automated setup fails
--- Workspace: $SYNAPSE_WORKSPACE
-    'master_key_password': '$MASTER_KEY_PASSWORD',
-    'sql_admin_user': '$SQL_ADMIN_USER',
-    'sql_admin_password': '$SQL_ADMIN_PASSWORD'
-}
+# The SQL backup script will be created later in the script
+# The Python fallback code has been removed to fix syntax errors
+# Python fallback section removed - it was causing syntax errors
+# The database creation is handled by the REST API calls above
 
-print("🚀 Running Python-based Synapse setup...")
-print("📝 Creating database and user using Azure CLI token...")
-
-# First, try to create database and user using Azure CLI token
-try:
-    # Get Azure user's access token (not service principal)
-    result = subprocess.run(
-        ["az", "account", "get-access-token", "--resource", "https://database.windows.net", "--query", "accessToken", "-o", "tsv"],
-        capture_output=True,
-        text=True
-    )
-    
-    if result.returncode == 0:
-        access_token = result.stdout.strip()
-        print("✅ Got Azure user access token")
-        
-        import requests
-        
-        # Create database
-        print("Creating BillingAnalytics database...")
-        db_url = f"https://{config['workspace_name']}-ondemand.sql.azuresynapse.net/sql/databases/master/query"
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-        
-        db_query = {"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics"}
-        db_response = requests.post(db_url, headers=headers, json=db_query, timeout=30)
-        
-        if db_response.status_code in [200, 201, 202]:
-            print("✅ Database created or already exists")
-        else:
-            print(f"⚠️ Database creation response: {db_response.status_code}")
-        
-        time.sleep(10)
-        
-        # Create master key and user
-        print("Creating master key and database user...")
-        setup_url = f"https://{config['workspace_name']}-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query"
-        
-        # Create master key
-        key_query = {"query": f"IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{config['master_key_password']}'"}
-        key_response = requests.post(setup_url, headers=headers, json=key_query, timeout=30)
-        
-        if key_response.status_code in [200, 201, 202]:
-            print("✅ Master key created or already exists")
-        
-        # Create user for service principal (using wiv_account name)
-        user_query = {"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}
-        user_response = requests.post(setup_url, headers=headers, json=user_query, timeout=30)
-        
-        if user_response.status_code in [200, 201, 202]:
-            print("✅ User 'wiv_account' created or already exists")
-        
-        # Grant permissions
-        grant_query = {"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}
-        grant_response = requests.post(setup_url, headers=headers, json=grant_query, timeout=30)
-        
-        if grant_response.status_code in [200, 201, 202]:
-            print("✅ Permissions granted to 'wiv_account'")
-        
-        # Create the BillingData view
-        print("Creating BillingData view...")
-        view_query = {"query": f"CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"}
-        view_response = requests.post(setup_url, headers=headers, json=view_query, timeout=30)
-        
-        if view_response.status_code in [200, 201, 202]:
-            print("✅ BillingData view created successfully!")
-        else:
-            print(f"⚠️ View creation response: {view_response.status_code}")
-            # Try with https protocol as fallback
-            print("Trying with https:// protocol...")
-            view_query_https = {"query": f"CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'https://{config['storage_account']}.blob.core.windows.net/{config['container_name']}/{config['export_path']}/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"}
-            view_response_https = requests.post(setup_url, headers=headers, json=view_query_https, timeout=30)
-            if view_response_https.status_code in [200, 201, 202]:
-                print("✅ BillingData view created with https protocol!")
-        
-        print("✅ Database, user, and view setup completed using Azure CLI token!")
-        
-    else:
-        print("⚠️ Could not get Azure user token")
-        print("   Please ensure you're logged in with 'az login'")
-        sys.exit(1)
-        
-except Exception as e:
-    print(f"⚠️ Error during setup: {str(e)[:200]}")
-    sys.exit(1)
-
-# Wait for changes to propagate
-print("⏳ Waiting for changes to propagate...")
-time.sleep(15)
-
-# NOW test if service principal can connect
-print("\n📝 Testing service principal connection...")
-import pyodbc
-
-try:
-    # Test connection with service principal
-    conn_str = f"""
-    DRIVER={{ODBC Driver 18 for SQL Server}};
-    SERVER={config['workspace_name']}-ondemand.sql.azuresynapse.net;
-    DATABASE=BillingAnalytics;
-    UID={config['client_id']};
-    PWD={config['client_secret']};
-    Authentication=ActiveDirectoryServicePrincipal;
-    Encrypt=yes;
-    TrustServerCertificate=no;
-    Connection Timeout=30;
-    """
-    
-    conn = pyodbc.connect(conn_str)
-    cursor = conn.cursor()
-    
-    # Test query
-    cursor.execute("SELECT USER_NAME() as usr, SUSER_NAME() as login")
-    result = cursor.fetchone()
-    print(f"✅ Service principal connected successfully!")
-    print(f"   User: {result.usr}, Login: {result.login}")
-    
-    # Create the billing data view
-    print("\n📝 Creating BillingData view...")
-    try:
-        cursor.execute(f"""
-        CREATE OR ALTER VIEW BillingData AS
-        SELECT *
-        FROM OPENROWSET(
-            BULK 'abfss://{config['container_name']}@{config['storage_account']}.dfs.core.windows.net/{config['export_path']}/*/*.csv',
-            FORMAT = 'CSV',
-            PARSER_VERSION = '2.0',
-            HEADER_ROW = TRUE
-        ) AS BillingExport
-        """)
-        print("✅ BillingData view created successfully!")
-    except Exception as e:
-        if "already exists" in str(e):
-            print("✅ BillingData view already exists")
-        else:
-            print(f"⚠️ View creation: {str(e)[:100]}")
-    
-    cursor.close()
-    conn.close()
-    
-    print("\n✅ Database setup completed successfully!")
-    print("   You can now run queries against BillingAnalytics.dbo.BillingData")
-    
-except pyodbc.Error as e:
-    if "Login failed" in str(e):
-        print("❌ Service principal still cannot connect")
-        print(f"   Error: {str(e)[:200]}")
-        print("\n📝 Manual intervention required:")
-        print("   1. Open Synapse Studio: https://web.azuresynapse.net")
-        print(f"   2. Select workspace: {config['workspace_name']}")
-        print("   3. Run this SQL:")
-        print("      CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;")
-        print("      ALTER ROLE db_datareader ADD MEMBER [wiv_account];")
-        print("      ALTER ROLE db_datawriter ADD MEMBER [wiv_account];")
-        print("      ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];")
-    else:
-        print(f"⚠️ Connection error: {str(e)[:200]}")
-
-PYTHON_EOF
-
-    # Execute the Python fallback script
+# Continue with the rest of the script
+if [ "$SETUP_COMPLETED" = "false" ]; then
     if command -v python3 >/dev/null 2>&1; then
         # Check for required Python packages
         if python3 -c "import pyodbc; import requests; import subprocess" 2>/dev/null; then
