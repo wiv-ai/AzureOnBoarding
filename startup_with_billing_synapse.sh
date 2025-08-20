@@ -864,8 +864,8 @@ if [ -n "$ACCESS_TOKEN" ]; then
                2>/dev/null && echo "✅ Database created via sqlcmd" || echo "   sqlcmd method failed"
     fi
     
-    # Method 2: Try REST API with proper error handling
-    echo "   Trying REST API method..."
+    # Method 2: Try REST API with proper error handling and retry logic
+    echo "   Trying REST API method with retry logic..."
     
     # First check if database already exists
     CHECK_DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
@@ -880,42 +880,57 @@ if [ -n "$ACCESS_TOKEN" ]; then
     if [[ "$CHECK_HTTP_CODE" == "200" ]] && [[ "$CHECK_BODY" == *"BillingAnalytics"* ]]; then
         echo "✅ Database BillingAnalytics already exists"
         DATABASE_CREATED=true
-    elif [[ "$CHECK_HTTP_CODE" == "500" ]]; then
-        # HTTP 500 might mean we can't query, try to create anyway
-        echo "   Cannot verify database existence (HTTP 500), attempting creation..."
-        
-        # Try simple CREATE DATABASE
-        DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
-        
-        HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-        
-        if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
-            echo "✅ Database created successfully"
-            DATABASE_CREATED=true
-        else
-            echo "   REST API method failed (HTTP $HTTP_CODE)"
-            DATABASE_CREATED=false
-        fi
     else
-        # Try to create the database
-        DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
+        # Try to create the database with retry logic for lock issues
+        echo "   Attempting to create database BillingAnalytics..."
+        DATABASE_CREATED=false
+        RETRY_COUNT=0
+        MAX_RETRIES=3
         
-        HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        while [ "$DATABASE_CREATED" = "false" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if [ $RETRY_COUNT -gt 0 ]; then
+                echo "   Retry attempt $RETRY_COUNT/$MAX_RETRIES..."
+                sleep 10  # Wait 10 seconds between retries
+            fi
+            
+            # Try to create database with IF NOT EXISTS check
+            DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+                -H "Authorization: Bearer $ACCESS_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
+            
+            HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+            RESPONSE_BODY=$(echo "$DB_RESPONSE" | grep -v "HTTP_CODE:")
+            
+            if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+                echo "✅ Database created successfully"
+                DATABASE_CREATED=true
+            elif [[ "$RESPONSE_BODY" == *"Could not obtain exclusive lock"* ]]; then
+                echo "   ⚠️ Database lock issue detected. Waiting before retry..."
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+            else
+                echo "   REST API method failed (HTTP $HTTP_CODE)"
+                # Try simple CREATE DATABASE as fallback
+                DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+                    "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
+                    -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    -H "Content-Type: application/json" \
+                    -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
+                
+                HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+                
+                if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+                    echo "✅ Database created successfully with fallback method"
+                    DATABASE_CREATED=true
+                else
+                    RETRY_COUNT=$((RETRY_COUNT + 1))
+                fi
+            fi
+        done
         
-        if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
-            echo "✅ Database created successfully"
-            DATABASE_CREATED=true
-        else
-            echo "   REST API method failed (HTTP $HTTP_CODE)"
-            DATABASE_CREATED=false
+        if [ "$DATABASE_CREATED" = "false" ]; then
+            echo "   ❌ Failed to create database after $MAX_RETRIES attempts"
         fi
     fi
     
@@ -938,23 +953,44 @@ if [ -n "$ACCESS_TOKEN" ]; then
         echo "5. Copy and run this SQL:"
         echo ""
         echo "--------------------------- COPY FROM HERE ---------------------------"
-        echo "CREATE DATABASE BillingAnalytics;"
+        echo "-- IMPORTANT: If you get 'Could not obtain exclusive lock on database model' error,"
+        echo "-- wait a few seconds and try again. This is a temporary Azure Synapse issue."
+        echo ""
+        echo "-- Step 1: Check if database exists and create it"
+        echo "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')"
+        echo "BEGIN"
+        echo "    CREATE DATABASE BillingAnalytics;"
+        echo "END"
         echo "GO"
+        echo ""
+        echo "-- If the above fails with lock error, wait 10 seconds and try this instead:"
+        echo "-- CREATE DATABASE BillingAnalytics;"
+        echo "-- GO"
         echo ""
         echo "USE BillingAnalytics;"
         echo "GO"
         echo ""
-        echo "CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';"
+        echo "-- Step 2: Create master key if it doesn't exist"
+        echo "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')"
+        echo "BEGIN"
+        echo "    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';"
+        echo "END"
         echo "GO"
         echo ""
-        echo "CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;"
+        echo "-- Step 3: Create user from external provider"
+        echo "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')"
+        echo "BEGIN"
+        echo "    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;"
+        echo "END"
         echo "GO"
         echo ""
+        echo "-- Step 4: Grant permissions"
         echo "ALTER ROLE db_datareader ADD MEMBER [wiv_account];"
         echo "ALTER ROLE db_datawriter ADD MEMBER [wiv_account];"
         echo "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
         echo "GO"
         echo ""
+        echo "-- Step 5: Create or update the billing data view"
         echo "CREATE OR ALTER VIEW BillingData AS"
         echo "SELECT * FROM OPENROWSET("
         echo "    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',"
