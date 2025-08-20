@@ -802,55 +802,75 @@ if [ -n "$ACCESS_TOKEN" ]; then
     echo "Creating database BillingAnalytics..."
     
     # Synapse serverless SQL pool uses simple syntax
-    DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+    # First check if database already exists
+    CHECK_DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
+        -d '{"query": "SELECT name FROM sys.databases WHERE name = '\''BillingAnalytics'\''"}' 2>&1)
     
-    HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-    RESPONSE_BODY=$(echo "$DB_RESPONSE" | grep -v "HTTP_CODE:")
+    CHECK_HTTP_CODE=$(echo "$CHECK_DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    CHECK_BODY=$(echo "$CHECK_DB_RESPONSE" | grep -v "HTTP_CODE:")
     
-    if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
-        echo "✅ Database created successfully (HTTP $HTTP_CODE)"
-    elif [[ "$RESPONSE_BODY" == *"already exists"* ]]; then
-        echo "✅ Database already exists"
+    if [[ "$CHECK_HTTP_CODE" == "200" ]] && [[ "$CHECK_BODY" == *"BillingAnalytics"* ]]; then
+        echo "✅ Database BillingAnalytics already exists - skipping creation"
     else
-        echo "❌ Database creation failed (HTTP $HTTP_CODE)"
-        echo "   Response: ${RESPONSE_BODY:0:200}"
-        echo "   Trying alternative method..."
-        
-        # Try with IF NOT EXISTS
-        ALT_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+        # Try to create the database
+        DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
             "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
+            -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
         
-        ALT_HTTP_CODE=$(echo "$ALT_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-        if [[ "$ALT_HTTP_CODE" == "200" ]] || [[ "$ALT_HTTP_CODE" == "201" ]] || [[ "$ALT_HTTP_CODE" == "202" ]]; then
-            echo "✅ Database created with IF NOT EXISTS (HTTP $ALT_HTTP_CODE)"
+        HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        RESPONSE_BODY=$(echo "$DB_RESPONSE" | grep -v "HTTP_CODE:")
+        
+        if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
+            echo "✅ Database created successfully (HTTP $HTTP_CODE)"
+        elif [[ "$RESPONSE_BODY" == *"already exists"* ]]; then
+            echo "✅ Database already exists"
         else
-            echo "❌ Alternative method also failed (HTTP $ALT_HTTP_CODE)"
-            echo "   Database creation requires manual intervention"
+            echo "⚠️ Database creation returned HTTP $HTTP_CODE"
+            if [[ "$HTTP_CODE" == "500" ]]; then
+                echo "   This might be a transient error or the database might already exist"
+            fi
+            echo "   Full response: ${RESPONSE_BODY:0:500}"
         fi
     fi
     
+
+    
     sleep 15  # Increased wait time
     
-    # Create master key separately
+    # Create master key separately (only if database exists)
     echo "Creating master key..."
-    KEY_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+    
+    # Check if we can access the database first
+    DB_ACCESS_CHECK=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' 2>&1)
+        -d '{"query": "SELECT DB_NAME()"}' 2>&1)
     
-    KEY_HTTP_CODE=$(echo "$KEY_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-    if [[ "$KEY_HTTP_CODE" == "200" ]] || [[ "$KEY_HTTP_CODE" == "201" ]] || [[ "$KEY_HTTP_CODE" == "202" ]]; then
-        echo "✅ Master key created (HTTP $KEY_HTTP_CODE)"
+    DB_ACCESS_CODE=$(echo "$DB_ACCESS_CHECK" | grep "HTTP_CODE:" | cut -d: -f2)
+    
+    if [[ "$DB_ACCESS_CODE" == "200" ]]; then
+        # Database is accessible, try to create master key
+        KEY_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' 2>&1)
+        
+        KEY_HTTP_CODE=$(echo "$KEY_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        if [[ "$KEY_HTTP_CODE" == "200" ]] || [[ "$KEY_HTTP_CODE" == "201" ]] || [[ "$KEY_HTTP_CODE" == "202" ]]; then
+            echo "✅ Master key created or already exists (HTTP $KEY_HTTP_CODE)"
+        else
+            echo "⚠️ Master key creation returned HTTP $KEY_HTTP_CODE (may already exist)"
+        fi
     else
-        echo "❌ Master key creation failed (HTTP $KEY_HTTP_CODE)"
+        echo "⚠️ Cannot access database BillingAnalytics (HTTP $DB_ACCESS_CODE)"
+        echo "   Skipping master key creation"
     fi
     
     sleep 5
