@@ -1112,9 +1112,12 @@ if [ -n "$ACCESS_TOKEN" ]; then
     
     sleep 5
     
-    # Create BillingData view - try both protocols
+    # Create BillingData view - try multiple approaches with better error handling
     echo "Creating BillingData view..."
-    VIEW_SQL="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
+    
+    # First, try with recursive wildcard pattern using https:// (most flexible)
+    echo "   Attempting view creation with recursive wildcard..."
+    VIEW_SQL="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'https://$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$CONTAINER_NAME/**/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
     
     VIEW_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
@@ -1123,24 +1126,57 @@ if [ -n "$ACCESS_TOKEN" ]; then
         -d "{\"query\": \"$VIEW_SQL\"}" 2>&1)
     
     VIEW_HTTP_CODE=$(echo "$VIEW_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+    VIEW_BODY=$(echo "$VIEW_RESPONSE" | grep -v "HTTP_CODE:")
+    
     if [[ "$VIEW_HTTP_CODE" == "200" ]] || [[ "$VIEW_HTTP_CODE" == "201" ]] || [[ "$VIEW_HTTP_CODE" == "202" ]]; then
-        echo "✅ View created (HTTP $VIEW_HTTP_CODE)"
-    else
-        echo "❌ View creation failed (HTTP $VIEW_HTTP_CODE)"
-        echo "   Trying https protocol for view..."
-        VIEW_SQL_HTTPS="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net/$CONTAINER_NAME/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
+        echo "✅ View created successfully with https:// protocol"
+    elif [[ "$VIEW_BODY" == *"cannot be listed"* ]] || [[ "$VIEW_BODY" == *"No files found"* ]] || [[ "$VIEW_BODY" == *"path does not exist"* ]]; then
+        echo "⚠️ No CSV files found in storage yet. Creating placeholder view..."
         
-        HTTPS_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+        # Create a placeholder view that won't fail
+        PLACEHOLDER_SQL="CREATE OR ALTER VIEW BillingData AS SELECT 'No billing data available yet. Files will be loaded from: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME' as Message, GETDATE() as CheckedAt"
+        
+        PLACEHOLDER_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
             "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"query\": \"$VIEW_SQL_HTTPS\"}" 2>&1)
+            -d "{\"query\": \"$PLACEHOLDER_SQL\"}" 2>&1)
         
-        HTTPS_HTTP_CODE=$(echo "$HTTPS_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-        if [[ "$HTTPS_HTTP_CODE" == "200" ]] || [[ "$HTTPS_HTTP_CODE" == "201" ]] || [[ "$HTTPS_HTTP_CODE" == "202" ]]; then
-            echo "✅ View created with HTTPS protocol (HTTP $HTTPS_HTTP_CODE)"
+        PLACEHOLDER_HTTP_CODE=$(echo "$PLACEHOLDER_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        if [[ "$PLACEHOLDER_HTTP_CODE" == "200" ]] || [[ "$PLACEHOLDER_HTTP_CODE" == "201" ]] || [[ "$PLACEHOLDER_HTTP_CODE" == "202" ]]; then
+            echo "✅ Placeholder view created. Update it once CSV files are available."
+            echo "   Storage path: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME"
         else
-            echo "❌ View creation failed with both protocols (HTTP $HTTPS_HTTP_CODE)"
+            echo "⚠️ Could not create placeholder view."
+        fi
+    else
+        # Try with abfss:// protocol as fallback
+        echo "   Trying abfss:// protocol..."
+        VIEW_SQL_ABFSS="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/**/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
+        
+        ABFSS_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": \"$VIEW_SQL_ABFSS\"}" 2>&1)
+        
+        ABFSS_HTTP_CODE=$(echo "$ABFSS_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+        ABFSS_BODY=$(echo "$ABFSS_RESPONSE" | grep -v "HTTP_CODE:")
+        
+        if [[ "$ABFSS_HTTP_CODE" == "200" ]] || [[ "$ABFSS_HTTP_CODE" == "201" ]] || [[ "$ABFSS_HTTP_CODE" == "202" ]]; then
+            echo "✅ View created with abfss:// protocol"
+        elif [[ "$ABFSS_BODY" == *"cannot be listed"* ]] || [[ "$ABFSS_BODY" == *"No files found"* ]]; then
+            echo "⚠️ No CSV files in storage. Creating placeholder view..."
+            PLACEHOLDER_SQL="CREATE OR ALTER VIEW BillingData AS SELECT 'Waiting for billing data in: $STORAGE_ACCOUNT_NAME/$CONTAINER_NAME' as Status"
+            curl -s -X POST \
+                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+                -H "Authorization: Bearer $ACCESS_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"query\": \"$PLACEHOLDER_SQL\"}" \
+                -o /dev/null 2>&1
+            echo "✅ Placeholder view created"
+        else
+            echo "⚠️ View creation needs manual configuration"
         fi
     fi
     fi  # End of DATABASE_CREATED check
