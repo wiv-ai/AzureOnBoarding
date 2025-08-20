@@ -740,6 +740,59 @@ fi
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
+# ===========================
+# CONFIGURE FIREWALL RULES
+# ===========================
+# IMPORTANT: Firewall rules must be configured before database creation
+echo ""
+echo "🔥 Configuring firewall rules (required before database creation)..."
+
+# Get current client IP
+CLIENT_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "")
+if [ -z "$CLIENT_IP" ]; then
+    # Try alternative method
+    CLIENT_IP=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null || echo "")
+fi
+
+# Create firewall rule for current client IP
+if [ -n "$CLIENT_IP" ]; then
+    echo "  - Adding rule for your IP address: $CLIENT_IP"
+    az synapse workspace firewall-rule create \
+        --name "ClientIP_$(echo $CLIENT_IP | tr . _)" \
+        --workspace-name "$SYNAPSE_WORKSPACE" \
+        --resource-group "$BILLING_RG" \
+        --start-ip-address "$CLIENT_IP" \
+        --end-ip-address "$CLIENT_IP" \
+        --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+fi
+
+# Create firewall rule to allow Azure services
+echo "  - Adding rule for Azure services..."
+az synapse workspace firewall-rule create \
+    --name "AllowAllWindowsAzureIps" \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" \
+    --start-ip-address "0.0.0.0" \
+    --end-ip-address "0.0.0.0" \
+    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+
+# Create firewall rule to allow all IPs (for remote access)
+echo "  - Adding rule for all IPs (remote access)..."
+az synapse workspace firewall-rule create \
+    --name "AllowAllIPs" \
+    --workspace-name "$SYNAPSE_WORKSPACE" \
+    --resource-group "$BILLING_RG" \
+    --start-ip-address "0.0.0.0" \
+    --end-ip-address "255.255.255.255" \
+    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+
+# Wait for firewall rules to propagate
+echo "⏳ Waiting 30 seconds for firewall rules to fully propagate..."
+sleep 30
+
+echo "✅ Firewall rules configured successfully"
+echo ""
+
 # Grant the service principal Synapse roles immediately
 echo "🔐 Granting Synapse workspace roles to service principal..."
 az synapse role assignment create \
@@ -1292,53 +1345,8 @@ az role assignment create \
 echo "⏳ Waiting for Synapse workspace to be fully operational..."
 sleep 30
 
-# Create firewall rules
-echo "🔥 Configuring firewall rules..."
-
-# Get current client IP
-CLIENT_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "")
-if [ -z "$CLIENT_IP" ]; then
-    # Try alternative method
-    CLIENT_IP=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null || echo "")
-fi
-
-# Create firewall rule for current client IP
-if [ -n "$CLIENT_IP" ]; then
-    echo "  - Adding rule for your IP address: $CLIENT_IP"
-    az synapse workspace firewall-rule create \
-        --name "ClientIP_$(echo $CLIENT_IP | tr . _)" \
-        --workspace-name "$SYNAPSE_WORKSPACE" \
-        --resource-group "$BILLING_RG" \
-        --start-ip-address "$CLIENT_IP" \
-        --end-ip-address "$CLIENT_IP" \
-        --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
-fi
-
-# Create firewall rule to allow Azure services
-echo "  - Adding rule for Azure services..."
-az synapse workspace firewall-rule create \
-    --name "AllowAllWindowsAzureIps" \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --start-ip-address "0.0.0.0" \
-    --end-ip-address "0.0.0.0" \
-    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
-
-# Create firewall rule to allow all IPs (for remote access)
-echo "  - Adding rule for all IPs (remote access)..."
-az synapse workspace firewall-rule create \
-    --name "AllowAllIPs" \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --start-ip-address "0.0.0.0" \
-    --end-ip-address "255.255.255.255" \
-    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
-
-# Wait longer for firewall rules to propagate
-echo "⏳ Waiting 30 seconds for firewall rules to fully propagate..."
-sleep 30
-
-echo "✅ Firewall rules configured"
+# Note: Firewall rules have been moved to line 744 (right after Synapse workspace creation)
+# This ensures they are configured before database creation attempts
 
 # ===========================
 # SYNAPSE PERMISSIONS SETUP
