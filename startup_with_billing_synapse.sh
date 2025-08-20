@@ -37,11 +37,9 @@ if ! command -v az &> /dev/null; then
     
     case $OS_TYPE in
         debian)
-            # Ubuntu/Debian
             curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
             ;;
         redhat)
-            # RHEL/CentOS/Fedora
             sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
             echo -e "[azure-cli]
 name=Azure CLI
@@ -52,17 +50,15 @@ gpgkey=https://packages.microsoft.com/keys/microsoft.asc" | sudo tee /etc/yum.re
             sudo yum install -y azure-cli
             ;;
         macos)
-            # macOS
             if command -v brew &> /dev/null; then
                 brew update && brew install azure-cli
             else
-                echo "❌ Homebrew not found. Please install Homebrew first:"
-                echo "   /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+                echo "❌ Homebrew not found. Please install Homebrew first"
                 exit 1
             fi
             ;;
         *)
-            echo "⚠️ Please install Azure CLI manually: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+            echo "⚠️ Please install Azure CLI manually"
             ;;
     esac
 else
@@ -91,63 +87,7 @@ else
     echo "✅ Python3 is already installed ($(python3 --version))"
 fi
 
-# Install ODBC drivers and pyodbc dependencies
-echo "📦 Installing ODBC drivers for SQL Server..."
-
-case $OS_TYPE in
-    debian)
-        # Install ODBC driver dependencies
-        sudo apt-get update
-        sudo apt-get install -y unixodbc-dev
-        
-        # Install Microsoft ODBC Driver 18 for SQL Server
-        if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" &> /dev/null; then
-            curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-            curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-            sudo apt-get update
-            sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
-            echo "✅ ODBC Driver 18 for SQL Server installed"
-        else
-            echo "✅ ODBC Driver 18 for SQL Server is already installed"
-        fi
-        ;;
-    redhat)
-        sudo yum install -y unixODBC-devel
-        
-        if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" &> /dev/null; then
-            curl https://packages.microsoft.com/config/rhel/8/prod.repo | sudo tee /etc/yum.repos.d/mssql-release.repo
-            sudo ACCEPT_EULA=Y yum install -y msodbcsql18
-            echo "✅ ODBC Driver 18 for SQL Server installed"
-        else
-            echo "✅ ODBC Driver 18 for SQL Server is already installed"
-        fi
-        ;;
-    macos)
-        if command -v brew &> /dev/null; then
-            brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-            brew update
-            HOMEBREW_NO_ENV_FILTERING=1 ACCEPT_EULA=Y brew install msodbcsql18
-            echo "✅ ODBC Driver 18 for SQL Server installed"
-        fi
-        ;;
-esac
-
-# Install Python packages
-echo "📦 Installing required Python packages..."
-pip3 install --upgrade pip 2>/dev/null || python3 -m pip install --upgrade pip 2>/dev/null
-
-# Install required Python packages
-PYTHON_PACKAGES="pyodbc pandas azure-identity azure-storage-blob requests"
-for package in $PYTHON_PACKAGES; do
-    if ! python3 -c "import ${package%%-*}" 2>/dev/null; then
-        echo "  Installing $package..."
-        pip3 install $package 2>/dev/null || python3 -m pip install $package 2>/dev/null || sudo pip3 install $package 2>/dev/null
-    else
-        echo "  ✅ $package is already installed"
-    fi
-done
-
-# Install jq for JSON parsing (useful for API responses)
+# Install jq for JSON parsing
 if ! command -v jq &> /dev/null; then
     echo "📦 Installing jq..."
     case $OS_TYPE in
@@ -167,41 +107,11 @@ else
     echo "✅ jq is already installed"
 fi
 
-# Install sqlcmd if not present (optional but useful)
-if ! command -v sqlcmd &> /dev/null; then
-    echo "📦 Installing sqlcmd (optional)..."
-    case $OS_TYPE in
-        debian)
-            if ! command -v sqlcmd &> /dev/null; then
-                curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-                curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list
-                sudo apt-get update
-                sudo ACCEPT_EULA=Y apt-get install -y mssql-tools
-                echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
-                export PATH="$PATH:/opt/mssql-tools/bin"
-            fi
-            ;;
-        redhat)
-            sudo ACCEPT_EULA=Y yum install -y mssql-tools
-            echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
-            export PATH="$PATH:/opt/mssql-tools/bin"
-            ;;
-        macos)
-            if command -v brew &> /dev/null; then
-                brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-                brew update
-                ACCEPT_EULA=Y brew install mssql-tools
-            fi
-            ;;
-    esac
-fi
-
 echo ""
 echo "✅ All required tools are installed!"
 echo "--------------------------------------"
 
-# Login to Azure (if needed)
-# Check if already logged in
+# Login to Azure
 if ! az account show &> /dev/null; then
     echo ""
     echo "🔐 Please login to Azure..."
@@ -214,18 +124,13 @@ fi
 SUBSCRIPTIONS=$(az account list --query '[].{name:name, id:id}' -o tsv)
 
 echo "📦 Available Azure subscriptions:"
-echo "Name      ID"
-echo "--------  ------------------------------------"
 echo "$SUBSCRIPTIONS"
 
-# Prompt user to pick subscription for creating the app
-read -p "🔹 Enter the Subscription ID to use for creating the application: " APP_SUBSCRIPTION_ID
+# Prompt user to pick subscription
+read -p "🔹 Enter the Subscription ID to use: " APP_SUBSCRIPTION_ID
 az account set --subscription "$APP_SUBSCRIPTION_ID"
 
-# Set SUBSCRIPTION_ID variable for later use
 SUBSCRIPTION_ID="$APP_SUBSCRIPTION_ID"
-
-# Get Tenant ID
 TENANT_ID=$(az account show --query tenantId -o tsv)
 echo "Tenant ID: $TENANT_ID"
 
@@ -236,105 +141,87 @@ echo "🔐 Checking for service principal '$APP_DISPLAY_NAME'..."
 APP_ID=$(az ad sp list --display-name "$APP_DISPLAY_NAME" --query "[0].appId" -o tsv)
 
 if [ -z "$APP_ID" ]; then
-  echo "🔧 Creating new App Registration..."
-  APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --query appId -o tsv)
-  az ad sp create --id "$APP_ID" > /dev/null
-  echo "✅ Service principal created. App ID: $APP_ID"
-  
-  # Create client secret for new app
-  echo ""
-  echo "🔑 Creating client secret..."
-  if date --version >/dev/null 2>&1; then
-      END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
-  else
-      END_DATE=$(date -v +2y +"%Y-%m-%d")
-  fi
-  CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
-  echo "✅ Client secret created successfully"
-else
-  echo "✅ Service principal already exists. App ID: $APP_ID"
-  echo "⏭️  Skipping app creation..."
-  
-  # Prompt for the existing client secret or create new one
-  echo ""
-  echo "⚠️  IMPORTANT: The service principal already exists."
-  echo "   You need a client secret to continue."
-  echo ""
-  echo "   Options:"
-  echo "   1. Enter existing client secret (if you have it)"
-  echo "   2. Generate a new client secret (will invalidate old ones)"
-  echo "   3. Cancel (Ctrl+C)"
-  echo ""
-  
-  read -p "Do you want to generate a NEW client secret? (y/n): " GENERATE_NEW
-  
-  if [[ "$GENERATE_NEW" =~ ^[Yy]$ ]]; then
-    echo "🔑 Generating new client secret..."
-    # Generate expiry date (2 years from now)
+    echo "🔧 Creating new App Registration..."
+    APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --query appId -o tsv)
+    az ad sp create --id "$APP_ID" > /dev/null
+    echo "✅ Service principal created. App ID: $APP_ID"
+    
+    # Create client secret
+    echo ""
+    echo "🔑 Creating client secret..."
     if date --version >/dev/null 2>&1; then
         END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
     else
         END_DATE=$(date -v +2y +"%Y-%m-%d")
     fi
     CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
-    echo "✅ New client secret generated successfully"
+    echo "✅ Client secret created successfully"
+else
+    echo "✅ Service principal already exists. App ID: $APP_ID"
     echo ""
-    echo "⚠️  IMPORTANT: Save this secret NOW! It cannot be retrieved later:"
-    echo "   $CLIENT_SECRET"
-    echo ""
-    read -p "Press Enter once you've saved the secret..."
-  else
-    # Read existing client secret securely (hidden input)
-    read -s -p "🔑 Enter the existing client secret: " CLIENT_SECRET
-    echo "" # New line after hidden input
+    read -p "Do you want to generate a NEW client secret? (y/n): " GENERATE_NEW
     
-    # Validate that a secret was provided
-    if [ -z "$CLIENT_SECRET" ]; then
-      echo ""
-      echo "❌ Error: Client secret is required to continue"
-      echo ""
-      echo "To create a new secret manually:"
-      echo "  1. Go to Azure Portal > Azure Active Directory > App registrations"
-      echo "  2. Find 'wiv_account' (App ID: $APP_ID)"
-      echo "  3. Go to 'Certificates & secrets' > 'Client secrets'"
-      echo "  4. Click 'New client secret' and save the value"
-      echo ""
-      exit 1
+    if [[ "$GENERATE_NEW" =~ ^[Yy]$ ]]; then
+        echo "🔑 Generating new client secret..."
+        if date --version >/dev/null 2>&1; then
+            END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+        else
+            END_DATE=$(date -v +2y +"%Y-%m-%d")
+        fi
+        CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
+        echo "✅ New client secret generated successfully"
+    else
+        read -s -p "🔑 Enter the existing client secret: " CLIENT_SECRET
+        echo ""
+        
+        if [ -z "$CLIENT_SECRET" ]; then
+            echo "❌ Error: Client secret is required to continue"
+            exit 1
+        fi
+        echo "✅ Client secret provided"
     fi
-    
-    echo "✅ Client secret provided"
-  fi
 fi
 
-# Initial minimal permissions
+# Initial permissions
 echo ""
 echo "🔒 Setting up initial permissions..."
-
-# Only Cost Management Reader needs subscription-level access (for billing data)
 echo "  - Assigning Cost Management Reader at subscription level..."
 az role assignment create --assignee "$APP_ID" --role "Cost Management Reader" --scope "/subscriptions/$APP_SUBSCRIPTION_ID" --only-show-errors
 
-echo "  ✅ Initial permissions set. Resource-specific permissions will be assigned after resource creation."
+# ===========================
+# RESOURCE GROUP SETUP
+# ===========================
+BILLING_RG="rg-wiv"
+STORAGE_RG="$BILLING_RG"
+
+echo ""
+echo "📁 Checking resource group '$BILLING_RG'..."
+RG_EXISTS=$(az group exists --name "$BILLING_RG")
+
+if [ "$RG_EXISTS" = "true" ]; then
+    AZURE_REGION=$(az group show --name "$BILLING_RG" --query location -o tsv)
+    echo "✅ Using existing resource group '$BILLING_RG' in region: $AZURE_REGION"
+else
+    AZURE_REGION="northeurope"
+    echo "📍 Creating resource group '$BILLING_RG' in region: $AZURE_REGION"
+    az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
+fi
 
 # ===========================
-# BILLING EXPORT CONFIGURATION
+# STORAGE ACCOUNT SETUP
 # ===========================
 echo ""
 echo "💰 Configuring Azure Cost Management Billing Export..."
 echo "--------------------------------------"
 
-# Ask if user wants to use existing billing export
 echo ""
-echo "🔹 Do you have an existing billing export you want to use?"
-echo "   (This could be from Azure Cost Management or another subscription)"
 read -p "Use existing billing export? (y/n): " USE_EXISTING_EXPORT
 
 if [[ "$USE_EXISTING_EXPORT" =~ ^[Yy]$ ]]; then
     echo ""
     echo "📝 Please provide the existing billing export details:"
     
-    # Get storage account details
-    read -p "Storage Account Name (e.g., billingstorage12345): " EXISTING_STORAGE_ACCOUNT
+    read -p "Storage Account Name: " EXISTING_STORAGE_ACCOUNT
     read -p "Storage Account Resource Group: " EXISTING_STORAGE_RG
     read -p "Storage Account Subscription ID (or press Enter for current): " EXISTING_STORAGE_SUB
     
@@ -347,197 +234,92 @@ if [[ "$USE_EXISTING_EXPORT" =~ ^[Yy]$ ]]; then
         EXISTING_CONTAINER="billing-exports"
     fi
     
-    read -p "Export folder path (e.g., billing-data or DailyExport): " EXISTING_EXPORT_PATH
+    read -p "Export folder path (default: billing-data): " EXISTING_EXPORT_PATH
     if [ -z "$EXISTING_EXPORT_PATH" ]; then
         EXISTING_EXPORT_PATH="billing-data"
     fi
     
-    # Verify the storage account exists and is accessible
-    echo ""
-    echo "🔍 Verifying storage account access..."
-    STORAGE_CHECK=$(az storage account show \
-        --name "$EXISTING_STORAGE_ACCOUNT" \
-        --resource-group "$EXISTING_STORAGE_RG" \
-        --subscription "$EXISTING_STORAGE_SUB" \
-        --query name -o tsv 2>/dev/null)
-    
-    if [ -n "$STORAGE_CHECK" ]; then
-        echo "✅ Storage account verified: $EXISTING_STORAGE_ACCOUNT"
-        STORAGE_ACCOUNT_NAME="$EXISTING_STORAGE_ACCOUNT"
-        STORAGE_RG="$EXISTING_STORAGE_RG"
-        STORAGE_SUBSCRIPTION="$EXISTING_STORAGE_SUB"
-        CONTAINER_NAME="$EXISTING_CONTAINER"
-        EXPORT_PATH="$EXISTING_EXPORT_PATH"
-        USE_EXISTING_STORAGE=true
-        
-        # Get storage account location for Synapse
-        AZURE_REGION=$(az storage account show \
-            --name "$STORAGE_ACCOUNT_NAME" \
-            --resource-group "$STORAGE_RG" \
-            --subscription "$STORAGE_SUBSCRIPTION" \
-            --query location -o tsv)
-        echo "   Storage location: $AZURE_REGION"
-    else
-        echo "❌ Could not access storage account. Please check:"
-        echo "   - Storage account name: $EXISTING_STORAGE_ACCOUNT"
-        echo "   - Resource group: $EXISTING_STORAGE_RG"
-        echo "   - Subscription: $EXISTING_STORAGE_SUB"
-        echo "   - You have Reader access to the storage account"
-        echo ""
-        echo "Falling back to creating new storage..."
-        USE_EXISTING_STORAGE=false
-    fi
-else
-    USE_EXISTING_STORAGE=false
-fi
-
-# Use fixed resource group name for Synapse resources
-BILLING_RG="rg-wiv"
-STORAGE_RG="$BILLING_RG"  # Use same resource group for storage
-
-# Only create new storage if not using existing
-if [ "$USE_EXISTING_STORAGE" = "false" ]; then
-
-# Check if resource group exists and get its location
-echo "📁 Checking resource group '$BILLING_RG'..."
-RG_EXISTS=$(az group exists --name "$BILLING_RG")
-
-if [ "$RG_EXISTS" = "true" ]; then
-    # Resource group exists, get its location
-    AZURE_REGION=$(az group show --name "$BILLING_RG" --query location -o tsv)
-    echo "✅ Using existing resource group '$BILLING_RG' in region: $AZURE_REGION"
-else
-    # Resource group doesn't exist, create it in eastus2 (or another region that supports Synapse)
-    AZURE_REGION="northeurope"
-    echo "📍 Creating resource group '$BILLING_RG' in region: $AZURE_REGION"
-    az group create --name "$BILLING_RG" --location "$AZURE_REGION" --only-show-errors
-fi
-
-# Create storage account for billing exports
-STORAGE_ACCOUNT_NAME="billingstorage$(date +%s | tail -c 6)"
-echo "📦 Creating storage account '$STORAGE_ACCOUNT_NAME'..."
-az storage account create \
-    --name "$STORAGE_ACCOUNT_NAME" \
-    --resource-group "$BILLING_RG" \
-    --location "$AZURE_REGION" \
-    --sku Standard_LRS \
-    --kind StorageV2 \
-    --only-show-errors
-
-# Get storage account resource ID for permissions
-STORAGE_RESOURCE_ID=$(az storage account show \
-    --name "$STORAGE_ACCOUNT_NAME" \
-    --resource-group "$BILLING_RG" \
-    --query id -o tsv)
-
-# Assign Storage Blob Data Reader permission on this specific storage account
-echo "🔐 Assigning Storage Blob Data Reader on storage account..."
-az role assignment create \
-    --assignee "$APP_ID" \
-    --role "Storage Blob Data Reader" \
-    --scope "$STORAGE_RESOURCE_ID" \
-    --only-show-errors
-
-# Create container for billing exports
-CONTAINER_NAME="billing-exports"
-echo "📂 Creating container '$CONTAINER_NAME'..."
-STORAGE_KEY=$(az storage account keys list \
-    --resource-group "$BILLING_RG" \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --query '[0].value' -o tsv)
-
-az storage container create \
-    --name "$CONTAINER_NAME" \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --account-key "$STORAGE_KEY" \
-    --only-show-errors
-
-    # Set export path for new storage
-    EXPORT_PATH="billing-data"
-    STORAGE_SUBSCRIPTION=$(az account show --query id -o tsv)
-fi  # End of storage creation
-
-# Handle billing export creation
-EXPORT_NAME="DailyBillingExport"
-
-if [ "$USE_EXISTING_STORAGE" = "true" ] && [[ "$USE_EXISTING_EXPORT" =~ ^[Yy]$ ]]; then
-    echo ""
-    echo "✅ Using existing billing export configuration:"
-    echo "   Storage: $STORAGE_ACCOUNT_NAME"
-    echo "   Container: $CONTAINER_NAME"
-    echo "   Path: $EXPORT_PATH"
-    echo ""
-    echo "ℹ️  Note: Synapse will be configured to read from this existing export"
+    STORAGE_ACCOUNT_NAME="$EXISTING_STORAGE_ACCOUNT"
+    STORAGE_RG="$EXISTING_STORAGE_RG"
+    STORAGE_SUBSCRIPTION="$EXISTING_STORAGE_SUB"
+    CONTAINER_NAME="$EXISTING_CONTAINER"
+    EXPORT_PATH="$EXISTING_EXPORT_PATH"
+    USE_EXISTING_STORAGE=true
     SKIP_EXPORT_CREATION=true
 else
-    echo "📊 Creating daily billing export '$EXPORT_NAME'..."
+    USE_EXISTING_STORAGE=false
     SKIP_EXPORT_CREATION=false
-fi
-
-if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
-
-# Get storage account resource ID
-STORAGE_RESOURCE_ID=$(az storage account show \
-    --name "$STORAGE_ACCOUNT_NAME" \
-    --resource-group "$BILLING_RG" \
-    --query id -o tsv)
-
-# Create the export using REST API with FOCUS format
-# FOCUS (FinOps Open Cost and Usage Specification) provides standardized cost data
-# Settings: Type=FocusCost, Version=1.0, Format=CSV, Overwrite=true (partitionData)
-echo "📅 Setting up FOCUS billing export date range..."
-
-# Allow customization of export period via environment variables
-if [ -n "$BILLING_EXPORT_START_DATE" ] && [ -n "$BILLING_EXPORT_END_DATE" ]; then
-    # Use custom dates if provided
-    START_DATE="${BILLING_EXPORT_START_DATE}T00:00:00Z"
-    END_DATE="${BILLING_EXPORT_END_DATE}T00:00:00Z"
-    echo "   Using custom export period from environment variables"
-else
-    # Ask user if they want to customize the export period
-    echo ""
-    echo "🔹 Configure billing export date range:"
-    echo "   Default: Today to 5 years from now"
-    read -p "   Do you want to customize the export period? (y/n): " CUSTOMIZE_PERIOD
     
-    if [[ "$CUSTOMIZE_PERIOD" =~ ^[Yy]$ ]]; then
-        # Get custom dates from user
-        echo ""
-        echo "   Enter dates in YYYY-MM-DD format:"
-        read -p "   Start date (e.g., 2024-01-01): " CUSTOM_START
-        read -p "   End date (e.g., 2025-12-31): " CUSTOM_END
-        
-        if [ -n "$CUSTOM_START" ] && [ -n "$CUSTOM_END" ]; then
-            START_DATE="${CUSTOM_START}T00:00:00Z"
-            END_DATE="${CUSTOM_END}T00:00:00Z"
-        else
-            echo "   Invalid dates, using defaults..."
-            # Use default: current date as start (Azure doesn't allow past dates)
-            CURRENT_DATE=$(date +%Y-%m-%d)
-            CURRENT_YEAR=$(date +%Y)
-            FUTURE_YEAR=$((CURRENT_YEAR + 5))
-            FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
-            
-            START_DATE="${CURRENT_DATE}T00:00:00Z"
-            END_DATE="${FUTURE_DATE}T00:00:00Z"
-        fi
-    else
-        # Use default: current date as start (Azure doesn't allow past dates)
-        CURRENT_DATE=$(date +%Y-%m-%d)
-        CURRENT_YEAR=$(date +%Y)
-        FUTURE_YEAR=$((CURRENT_YEAR + 5))
-        FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
-        
-        START_DATE="${CURRENT_DATE}T00:00:00Z"
-        END_DATE="${FUTURE_DATE}T00:00:00Z"
-    fi
+    # Create new storage account
+    STORAGE_ACCOUNT_NAME="billingstorage$(date +%s | tail -c 6)"
+    echo "📦 Creating storage account '$STORAGE_ACCOUNT_NAME'..."
+    az storage account create \
+        --name "$STORAGE_ACCOUNT_NAME" \
+        --resource-group "$BILLING_RG" \
+        --location "$AZURE_REGION" \
+        --sku Standard_LRS \
+        --kind StorageV2 \
+        --only-show-errors
+    
+    # Get storage account resource ID
+    STORAGE_RESOURCE_ID=$(az storage account show \
+        --name "$STORAGE_ACCOUNT_NAME" \
+        --resource-group "$BILLING_RG" \
+        --query id -o tsv)
+    
+    # Assign Storage Blob Data Reader permission
+    echo "🔐 Assigning Storage Blob Data Reader on storage account..."
+    az role assignment create \
+        --assignee "$APP_ID" \
+        --role "Storage Blob Data Reader" \
+        --scope "$STORAGE_RESOURCE_ID" \
+        --only-show-errors
+    
+    # Create container
+    CONTAINER_NAME="billing-exports"
+    echo "📂 Creating container '$CONTAINER_NAME'..."
+    STORAGE_KEY=$(az storage account keys list \
+        --resource-group "$BILLING_RG" \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --query '[0].value' -o tsv)
+    
+    az storage container create \
+        --name "$CONTAINER_NAME" \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --account-key "$STORAGE_KEY" \
+        --only-show-errors
+    
+    EXPORT_PATH="billing-data"
+    STORAGE_SUBSCRIPTION=$(az account show --query id -o tsv)
 fi
 
-echo "   Export period: $START_DATE to $END_DATE"
-
-EXPORT_RESPONSE=$(az rest --method PUT \
-    --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2023-07-01-preview" \
-    --body @- <<EOF 2>&1
+# ===========================
+# BILLING EXPORT SETUP
+# ===========================
+if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
+    EXPORT_NAME="DailyBillingExport"
+    echo "📊 Creating daily billing export '$EXPORT_NAME'..."
+    
+    # Get storage account resource ID
+    STORAGE_RESOURCE_ID=$(az storage account show \
+        --name "$STORAGE_ACCOUNT_NAME" \
+        --resource-group "$STORAGE_RG" \
+        --query id -o tsv)
+    
+    # Set date range
+    CURRENT_DATE=$(date +%Y-%m-%d)
+    CURRENT_YEAR=$(date +%Y)
+    FUTURE_YEAR=$((CURRENT_YEAR + 5))
+    FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
+    START_DATE="${CURRENT_DATE}T00:00:00Z"
+    END_DATE="${FUTURE_DATE}T00:00:00Z"
+    
+    echo "   Export period: $START_DATE to $END_DATE"
+    
+    # Create export
+    az rest --method PUT \
+        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2023-07-01-preview" \
+        --body @- <<EOF 2>&1
 {
   "properties": {
     "schedule": {
@@ -553,7 +335,7 @@ EXPORT_RESPONSE=$(az rest --method PUT \
       "destination": {
         "resourceId": "$STORAGE_RESOURCE_ID",
         "container": "$CONTAINER_NAME",
-        "rootFolderPath": "billing-data"
+        "rootFolderPath": "$EXPORT_PATH"
       }
     },
     "definition": {
@@ -570,137 +352,15 @@ EXPORT_RESPONSE=$(az rest --method PUT \
   }
 }
 EOF
-)
-
-# Check if export creation was successful
-if [[ "$EXPORT_RESPONSE" == *"error"* ]] || [[ "$EXPORT_RESPONSE" == *"BadRequest"* ]]; then
-    echo "⚠️  Export creation failed. Checking if it already exists..."
     
-    # Check if export already exists
-    EXISTING_EXPORT=$(az rest --method GET \
-        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
-        --query "name" -o tsv 2>/dev/null)
+    echo "✅ Daily billing export configured"
     
-    if [ -n "$EXISTING_EXPORT" ]; then
-        echo "✅ Export '$EXPORT_NAME' already exists - no action needed"
-    else
-        echo "🔧 Attempting to fix export creation..."
-        
-        # Try deleting and recreating with cleaner JSON
-        az rest --method DELETE \
-            --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2021-10-01" \
-            2>/dev/null
-        
-        sleep 2
-        
-        # Ensure dates are current for retry
-        CURRENT_DATE=$(date +%Y-%m-%d)
-        CURRENT_YEAR=$(date +%Y)
-        FUTURE_YEAR=$((CURRENT_YEAR + 5))
-        FUTURE_DATE="${FUTURE_YEAR}-$(date +%m-%d)"
-        START_DATE="${CURRENT_DATE}T00:00:00Z"
-        END_DATE="${FUTURE_DATE}T00:00:00Z"
-        
-        # Create export config file for cleaner JSON handling
-        cat > /tmp/export_config_$$.json <<EXPORTJSON
-{
-  "properties": {
-    "schedule": {
-      "status": "Active",
-      "recurrence": "Daily",
-      "recurrencePeriod": {
-        "from": "$START_DATE",
-        "to": "$END_DATE"
-      }
-    },
-    "format": "Csv",
-    "deliveryInfo": {
-      "destination": {
-        "resourceId": "$STORAGE_RESOURCE_ID",
-        "container": "$CONTAINER_NAME",
-        "rootFolderPath": "billing-data"
-      }
-    },
-    "definition": {
-      "type": "FocusCost",
-      "timeframe": "MonthToDate",
-      "dataSet": {
-        "granularity": "Daily",
-        "configuration": {
-          "dataVersion": "1.0"
-        }
-      }
-    },
-    "partitionData": true
-  }
-}
-EXPORTJSON
-        
-        # Retry with JSON file
-        RETRY_RESPONSE=$(az rest --method PUT \
-            --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME?api-version=2023-07-01-preview" \
-            --body @/tmp/export_config_$$.json 2>&1)
-        
-        rm -f /tmp/export_config_$$.json
-        
-        if [[ "$RETRY_RESPONSE" == *"error"* ]]; then
-            echo "⚠️  Could not create billing export automatically"
-            echo "   You can create it manually in Azure Portal > Cost Management > Exports"
-            echo "   This won't affect Synapse functionality"
-        else
-            echo "✅ Daily billing export configured successfully on retry!"
-        fi
-    fi
-else
-    echo "✅ Daily billing export configured successfully"
-fi
-
-fi  # End of SKIP_EXPORT_CREATION check
-
-# ===========================
-# TRIGGER BILLING EXPORT IMMEDIATELY
-# ===========================
-echo ""
-echo "🔄 Triggering billing export to run immediately..."
-echo "   This will start populating data while we set up Synapse"
-
-if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
-    EXPORT_TRIGGER_RESULT=$(az rest --method POST \
+    # Trigger export
+    echo "🔄 Triggering billing export..."
+    az rest --method POST \
         --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2023-07-01-preview" \
-        --only-show-errors 2>&1)
-    
-    if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]] || [[ "$EXPORT_TRIGGER_RESULT" == *"Error"* ]]; then
-        echo "⚠️  Could not trigger export immediately"
-        echo "   This is normal if an export is already running"
-        echo "   Export will run automatically at midnight UTC daily"
-    else
-        echo "✅ Billing export triggered successfully!"
-        echo "   📊 Data will start appearing in 5-30 minutes at:"
-        echo "      Storage: $STORAGE_ACCOUNT_NAME"
-        echo "      Container: $CONTAINER_NAME/$EXPORT_PATH/"
-        echo "      Format: FOCUS 1.0 (standardized FinOps format)"
-        echo ""
-        echo "   ⏳ Continuing with Synapse setup while export runs in background..."
-    fi
-else
-    echo "   Using existing billing export - checking if we should trigger it..."
-    # Try to trigger existing export (may fail if different subscription owns it)
-    EXPORT_TRIGGER_RESULT=$(az rest --method POST \
-        --uri "https://management.azure.com/subscriptions/$APP_SUBSCRIPTION_ID/providers/Microsoft.CostManagement/exports/$EXPORT_NAME/run?api-version=2023-07-01-preview" \
-        --only-show-errors 2>&1)
-    
-    if [[ "$EXPORT_TRIGGER_RESULT" == *"error"* ]]; then
-        echo "   ℹ️  Could not trigger existing export (may be owned by different subscription)"
-        echo "   Export should be running on its regular schedule"
-    else
-        echo "✅ Existing export triggered to refresh data"
-    fi
+        --only-show-errors 2>&1
 fi
-
-echo ""
-echo "⏰ Billing export is now running in the background"
-echo "   Data will be available by the time Synapse setup completes"
-sleep 5
 
 # ===========================
 # SYNAPSE WORKSPACE SETUP
@@ -709,28 +369,21 @@ echo ""
 echo "🔷 Setting up Azure Synapse Analytics Workspace..."
 echo "--------------------------------------"
 
-# Use fixed Synapse workspace name
-# Generate unique suffix for Synapse workspace name
 UNIQUE_SUFFIX=$(date +%s | tail -c 6)
-SYNAPSE_WORKSPACE="wiv-synapse-billing-${UNIQUE_SUFFIX}"
+SYNAPSE_WORKSPACE="wiv-synapse-${UNIQUE_SUFFIX}"
 echo "📝 Synapse workspace name: $SYNAPSE_WORKSPACE"
 
-# Check if Synapse workspace already exists
-echo "🔍 Checking if Synapse workspace '$SYNAPSE_WORKSPACE' exists..."
+# Check if Synapse workspace exists
 SYNAPSE_EXISTS=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$BILLING_RG" --query name -o tsv 2>/dev/null)
 
 if [ -n "$SYNAPSE_EXISTS" ]; then
-    echo "✅ Synapse workspace '$SYNAPSE_WORKSPACE' already exists. Using existing workspace."
-    
-    # Get existing storage account info
+    echo "✅ Synapse workspace '$SYNAPSE_WORKSPACE' already exists."
     SYNAPSE_STORAGE=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$BILLING_RG" --query "defaultDataLakeStorage.accountUrl" -o tsv | sed 's|https://||' | sed 's|.dfs.core.windows.net||')
     FILESYSTEM_NAME=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$BILLING_RG" --query "defaultDataLakeStorage.filesystem" -o tsv)
-    echo "  - Storage Account: $SYNAPSE_STORAGE"
-    echo "  - Filesystem: $FILESYSTEM_NAME"
 else
     echo "🏗️ Creating new Synapse workspace '$SYNAPSE_WORKSPACE'..."
     
-    # Create Data Lake Storage Gen2 for Synapse
+    # Create Data Lake Storage Gen2
     SYNAPSE_STORAGE="synapsedl$(date +%s | tail -c 6)"
     echo "📦 Creating Data Lake Storage Gen2 account '$SYNAPSE_STORAGE'..."
     az storage account create \
@@ -741,14 +394,14 @@ else
         --kind StorageV2 \
         --hierarchical-namespace true \
         --only-show-errors
-
-    # Get Data Lake storage resource ID for permissions
+    
+    # Get Data Lake storage resource ID
     DATALAKE_RESOURCE_ID=$(az storage account show \
         --name "$SYNAPSE_STORAGE" \
         --resource-group "$BILLING_RG" \
         --query id -o tsv)
     
-    # Assign Storage Blob Data Contributor on Data Lake (Synapse needs write access)
+    # Assign Storage Blob Data Contributor
     echo "🔐 Assigning Storage Blob Data Contributor on Data Lake storage..."
     az role assignment create \
         --assignee "$APP_ID" \
@@ -756,7 +409,7 @@ else
         --scope "$DATALAKE_RESOURCE_ID" \
         --only-show-errors
     
-    # Create filesystem for Synapse
+    # Create filesystem
     FILESYSTEM_NAME="synapsefilesystem"
     echo "📂 Creating filesystem '$FILESYSTEM_NAME'..."
     az storage fs create \
@@ -764,12 +417,12 @@ else
         --account-name "$SYNAPSE_STORAGE" \
         --auth-mode login \
         --only-show-errors
-
+    
     # Create Synapse workspace
     echo "🔧 Creating Synapse workspace..."
     SQL_ADMIN_USER="sqladminuser"
     SQL_ADMIN_PASSWORD="P@ssw0rd$(date +%s | tail -c 6)!"
-
+    
     az synapse workspace create \
         --name "$SYNAPSE_WORKSPACE" \
         --resource-group "$BILLING_RG" \
@@ -781,25 +434,20 @@ else
         --only-show-errors
 fi
 
-# Wait for workspace to be created
+# Wait for workspace
 echo "⏳ Waiting for Synapse workspace to be fully provisioned..."
 az synapse workspace wait --resource-group "$BILLING_RG" --workspace-name "$SYNAPSE_WORKSPACE" --created
 
 # ===========================
 # CONFIGURE FIREWALL RULES
 # ===========================
-# IMPORTANT: Firewall rules must be configured before database creation
 echo ""
-echo "🔥 Configuring firewall rules (required before database creation)..."
+echo "🔥 Configuring firewall rules..."
 
 # Get current client IP
 CLIENT_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "")
-if [ -z "$CLIENT_IP" ]; then
-    # Try alternative method
-    CLIENT_IP=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null || echo "")
-fi
 
-# Create firewall rule for current client IP
+# Create firewall rules
 if [ -n "$CLIENT_IP" ]; then
     echo "  - Adding rule for your IP address: $CLIENT_IP"
     az synapse workspace firewall-rule create \
@@ -808,10 +456,10 @@ if [ -n "$CLIENT_IP" ]; then
         --resource-group "$BILLING_RG" \
         --start-ip-address "$CLIENT_IP" \
         --end-ip-address "$CLIENT_IP" \
-        --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+        --only-show-errors 2>/dev/null || true
 fi
 
-# Create firewall rule to allow Azure services
+# Allow Azure services
 echo "  - Adding rule for Azure services..."
 az synapse workspace firewall-rule create \
     --name "AllowAllWindowsAzureIps" \
@@ -819,403 +467,190 @@ az synapse workspace firewall-rule create \
     --resource-group "$BILLING_RG" \
     --start-ip-address "0.0.0.0" \
     --end-ip-address "0.0.0.0" \
-    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+    --only-show-errors 2>/dev/null || true
 
-# Create firewall rule to allow all IPs (for remote access)
-echo "  - Adding rule for all IPs (remote access)..."
+# Allow all IPs
+echo "  - Adding rule for all IPs..."
 az synapse workspace firewall-rule create \
     --name "AllowAllIPs" \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --resource-group "$BILLING_RG" \
     --start-ip-address "0.0.0.0" \
     --end-ip-address "255.255.255.255" \
-    --only-show-errors 2>/dev/null || echo "    (Rule may already exist)"
+    --only-show-errors 2>/dev/null || true
 
-# Wait for firewall rules to propagate
-echo "⏳ Waiting 30 seconds for firewall rules to fully propagate..."
+echo "⏳ Waiting for firewall rules to propagate..."
 sleep 30
 
-echo "✅ Firewall rules configured successfully"
-echo ""
-
-# Grant the service principal Synapse roles immediately
-echo "🔐 Granting Synapse workspace roles to service principal..."
+# Grant Synapse roles
+echo "🔐 Granting Synapse workspace roles..."
 az synapse role assignment create \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --role "Synapse Administrator" \
     --assignee "$APP_ID" \
-    --only-show-errors 2>/dev/null || echo "  Synapse Administrator role may already exist"
+    --only-show-errors 2>/dev/null || true
 
 az synapse role assignment create \
     --workspace-name "$SYNAPSE_WORKSPACE" \
     --role "Synapse SQL Administrator" \
     --assignee "$APP_ID" \
-    --only-show-errors 2>/dev/null || echo "  Synapse SQL Administrator role may already exist"
+    --only-show-errors 2>/dev/null || true
 
-# Also grant Synapse Administrator role to the current Azure user
+# Get current user ID and grant admin role
 CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
 if [ -n "$CURRENT_USER_ID" ]; then
-    echo "🔐 Granting Synapse Administrator role to current user..."
     az synapse role assignment create \
         --workspace-name "$SYNAPSE_WORKSPACE" \
         --role "Synapse Administrator" \
         --assignee "$CURRENT_USER_ID" \
-        --only-show-errors 2>/dev/null || echo "  Current user may already have Synapse Administrator role"
+        --only-show-errors 2>/dev/null || true
 fi
 
-# Wait for role assignments to propagate
-echo "⏳ Waiting for Synapse role assignments to propagate (30 seconds)..."
 sleep 30
 
-# Create database and grant permissions using Azure CLI
+# ===========================
+# DATABASE AND VIEW CREATION (FIXED)
+# ===========================
 echo ""
 echo "🔧 Creating BillingAnalytics database and configuring permissions..."
+echo "--------------------------------------"
 
-# Direct REST API approach optimized for Cloud Shell
-echo "Setting up database using REST API (optimized for Cloud Shell)..."
-
-# Use Azure CLI token for Synapse serverless SQL operations
-# Service principals have limitations with serverless SQL pools
-echo "Getting Azure CLI authentication token..."
-
+# Get Azure access token
 ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
 
 if [ -n "$ACCESS_TOKEN" ]; then
     echo "✅ Got Azure CLI access token"
-    AUTH_METHOD="AzureCLI"
     
-    # Important: The user running this script needs to be a Synapse Administrator
-    echo "   Note: Using your Azure user account for database creation"
-    echo "   You must be a Synapse Administrator on workspace: $SYNAPSE_WORKSPACE"
-else
-    echo "❌ Failed to get Azure CLI token"
-    echo "   Please ensure you're logged in with: az login"
-    AUTH_METHOD="None"
-fi
-
-if [ -n "$ACCESS_TOKEN" ]; then
-    echo "   Using authentication: $AUTH_METHOD"
-    
-    # Create database - Try multiple methods for Synapse serverless
-    echo "Creating database BillingAnalytics..."
-    
-    # Method 1: Try using sqlcmd if available
-    if command -v sqlcmd &> /dev/null; then
-        echo "   Trying sqlcmd method..."
-        sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
-               -d master \
-               -G \
-               -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics" \
-               2>/dev/null && echo "✅ Database created via sqlcmd" || echo "   sqlcmd method failed"
-    fi
-    
-    # Method 2: Try REST API with proper error handling and retry logic
-    echo "   Trying REST API method with retry logic..."
-    
-    # First check if database already exists
-    CHECK_DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "SELECT name FROM sys.databases WHERE name = '\''BillingAnalytics'\''"}' 2>&1)
-    
-    CHECK_HTTP_CODE=$(echo "$CHECK_DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-    CHECK_BODY=$(echo "$CHECK_DB_RESPONSE" | grep -v "HTTP_CODE:")
-    
-    if [[ "$CHECK_HTTP_CODE" == "200" ]] && [[ "$CHECK_BODY" == *"BillingAnalytics"* ]]; then
-        echo "✅ Database BillingAnalytics already exists"
-        DATABASE_CREATED=true
-    else
-        # Try to create the database with retry logic for lock issues
-        echo "   Attempting to create database BillingAnalytics..."
-        DATABASE_CREATED=false
-        RETRY_COUNT=0
-        MAX_RETRIES=3
+    # Function to execute SQL with proper error handling
+    execute_sql() {
+        local database=$1
+        local query=$2
+        local description=$3
         
-        while [ "$DATABASE_CREATED" = "false" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            if [ $RETRY_COUNT -gt 0 ]; then
-                echo "   Retry attempt $RETRY_COUNT/$MAX_RETRIES..."
-                sleep 10  # Wait 10 seconds between retries
-            fi
-            
-            # Try to create database with IF NOT EXISTS check
-            DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-                -H "Authorization: Bearer $ACCESS_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' 2>&1)
-            
-            HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-            RESPONSE_BODY=$(echo "$DB_RESPONSE" | grep -v "HTTP_CODE:")
-            
-            if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
-                echo "✅ Database created successfully"
-                DATABASE_CREATED=true
-            elif [[ "$RESPONSE_BODY" == *"Could not obtain exclusive lock"* ]]; then
-                echo "   ⚠️ Database lock issue detected. Waiting before retry..."
-                RETRY_COUNT=$((RETRY_COUNT + 1))
-            else
-                echo "   REST API method failed (HTTP $HTTP_CODE)"
-                # Try simple CREATE DATABASE as fallback
-                DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-                    "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-                    -H "Authorization: Bearer $ACCESS_TOKEN" \
-                    -H "Content-Type: application/json" \
-                    -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>&1)
-                
-                HTTP_CODE=$(echo "$DB_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-                
-                if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]] || [[ "$HTTP_CODE" == "202" ]]; then
-                    echo "✅ Database created successfully with fallback method"
-                    DATABASE_CREATED=true
-                else
-                    RETRY_COUNT=$((RETRY_COUNT + 1))
-                fi
-            fi
-        done
+        echo "  $description..."
         
-        if [ "$DATABASE_CREATED" = "false" ]; then
-            echo "   ❌ Failed to create database after $MAX_RETRIES attempts"
-        fi
-    fi
-    
-
-    
-    # If database creation failed, show manual steps
-    if [ "$DATABASE_CREATED" = "false" ]; then
-        echo ""
-        echo "================================================================"
-        echo "⚠️  DATABASE CREATION FAILED - MANUAL STEPS REQUIRED"
-        echo "================================================================"
-        echo ""
-        echo "The database could not be created automatically due to Synapse"
-        echo "serverless SQL pool limitations. Please create it manually:"
-        echo ""
-        echo "1. Open Synapse Studio: https://web.azuresynapse.net"
-        echo "2. Select workspace: $SYNAPSE_WORKSPACE"
-        echo "3. Click 'Develop' (left menu) → 'SQL scripts' → '+ New SQL script'"
-        echo "4. Connect to: 'Built-in' (serverless SQL pool)"
-        echo "5. Copy and run this SQL:"
-        echo ""
-        echo "--------------------------- COPY FROM HERE ---------------------------"
-        echo "-- IMPORTANT: If you get 'Could not obtain exclusive lock on database model' error,"
-        echo "-- wait a few seconds and try again. This is a temporary Azure Synapse issue."
-        echo ""
-        echo "-- Step 1: Check if database exists and create it"
-        echo "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')"
-        echo "BEGIN"
-        echo "    CREATE DATABASE BillingAnalytics;"
-        echo "END"
-        echo "GO"
-        echo ""
-        echo "-- If the above fails with lock error, wait 10 seconds and try this instead:"
-        echo "-- CREATE DATABASE BillingAnalytics;"
-        echo "-- GO"
-        echo ""
-        echo "USE BillingAnalytics;"
-        echo "GO"
-        echo ""
-        echo "-- Step 2: Create master key if it doesn't exist"
-        echo "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')"
-        echo "BEGIN"
-        echo "    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';"
-        echo "END"
-        echo "GO"
-        echo ""
-        echo "-- Step 3: Create user from external provider"
-        echo "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')"
-        echo "BEGIN"
-        echo "    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;"
-        echo "END"
-        echo "GO"
-        echo ""
-        echo "-- Step 4: Grant permissions"
-        echo "ALTER ROLE db_datareader ADD MEMBER [wiv_account];"
-        echo "ALTER ROLE db_datawriter ADD MEMBER [wiv_account];"
-        echo "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
-        echo "GO"
-        echo ""
-        echo "-- Step 5: Create placeholder view (will be updated when billing data is available)"
-        echo "-- Drop existing view if it exists"
-        echo "IF OBJECT_ID('BillingData', 'V') IS NOT NULL"
-        echo "    DROP VIEW BillingData;"
-        echo "GO"
-        echo ""
-        echo "-- Create placeholder view for now"
-        echo "CREATE VIEW BillingData AS"
-        echo "SELECT "
-        echo "    'No billing data available yet in storage account: $STORAGE_ACCOUNT_NAME' as Message,"
-        echo "    'Container: $CONTAINER_NAME' as Container,"
-        echo "    GETDATE() as CheckedAt;"
-        echo "GO"
-        echo ""
-        echo "-- Test the placeholder view"
-        echo "SELECT * FROM BillingData;"
-        echo "GO"
-        echo ""
-        echo "-- Note: Once billing export runs and CSV files are available, update the view with:"
-        echo "-- DROP VIEW BillingData;"
-        echo "-- CREATE VIEW BillingData AS"
-        echo "-- SELECT * FROM OPENROWSET("
-        echo "--     BULK 'https://$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$CONTAINER_NAME/**/*.csv',"
-        echo "--     FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE"
-        echo "-- ) AS BillingExport;"
-        echo "GO"
-        echo "--------------------------- COPY TO HERE -----------------------------"
-        echo ""
-        echo "After running the SQL, press Enter to continue..."
-        read -p ""
-        DATABASE_CREATED=true  # Assume user created it manually
-    fi
-    
-    sleep 5
-    
-    # Create master key separately (only if database was created)
-    if [ "$DATABASE_CREATED" = "true" ]; then
-        echo "Creating master key..."
+        # Properly escape the query for JSON
+        local json_query=$(echo -n "$query" | jq -Rs .)
         
-        # Check if we can access the database first
-        DB_ACCESS_CHECK=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
+        local response=$(curl -s -w "\n##HTTP_STATUS##%{http_code}" -X POST \
+            "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/${database}/query" \
             -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"query": "SELECT DB_NAME()"}' 2>&1)
+            -d "{\"query\": $json_query}" 2>&1)
         
-        DB_ACCESS_CODE=$(echo "$DB_ACCESS_CHECK" | grep "HTTP_CODE:" | cut -d: -f2)
+        local http_status=$(echo "$response" | grep -o "##HTTP_STATUS##.*" | cut -d'#' -f5)
+        local body=$(echo "$response" | sed '/##HTTP_STATUS##/d')
         
-        if [[ "$DB_ACCESS_CODE" == "200" ]]; then
-        # Database is accessible, try to create master key
-        KEY_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-            "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '\''##MS_DatabaseMasterKey##'\'') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '\''StrongP@ssw0rd2024!'\''"}' 2>&1)
-        
-        KEY_HTTP_CODE=$(echo "$KEY_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-        if [[ "$KEY_HTTP_CODE" == "200" ]] || [[ "$KEY_HTTP_CODE" == "201" ]] || [[ "$KEY_HTTP_CODE" == "202" ]]; then
-            echo "✅ Master key created or already exists (HTTP $KEY_HTTP_CODE)"
+        if [[ "$http_status" == "200" ]] || [[ "$http_status" == "201" ]] || [[ "$http_status" == "202" ]]; then
+            echo "    ✅ Success"
+            return 0
         else
-            echo "⚠️ Master key creation returned HTTP $KEY_HTTP_CODE (may already exist)"
+            echo "    ⚠️  HTTP $http_status"
+            if [[ "$body" == *"already exists"* ]]; then
+                echo "    ℹ️  Already exists"
+                return 0
+            fi
+            return 1
         fi
-        else
-            echo "⚠️ Cannot access database BillingAnalytics (HTTP $DB_ACCESS_CODE)"
-            echo "   Skipping master key creation"
-        fi
-    else
-        echo "   Skipping master key, user, and view creation (database not created)"
-    fi
+    }
+    
+    # Step 1: Create database
+    execute_sql "master" \
+        "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics" \
+        "Creating database BillingAnalytics"
     
     sleep 5
     
-    # Create user (only if database was created)
-    if [ "$DATABASE_CREATED" = "true" ]; then
-        echo "Creating user wiv_account..."
-        USER_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '\''wiv_account'\'') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER"}' 2>&1)
+    # Step 2: Create master key
+    MASTER_KEY_PASSWORD="StrongP@ssw0rd$(date +%s | tail -c 4)!"
+    execute_sql "BillingAnalytics" \
+        "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD'" \
+        "Creating master key"
     
-    USER_HTTP_CODE=$(echo "$USER_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-    if [[ "$USER_HTTP_CODE" == "200" ]] || [[ "$USER_HTTP_CODE" == "201" ]] || [[ "$USER_HTTP_CODE" == "202" ]]; then
-        echo "✅ User created (HTTP $USER_HTTP_CODE)"
-    else
-        echo "❌ User creation failed (HTTP $USER_HTTP_CODE)"
-    fi
+    sleep 3
     
-    sleep 5
+    # Step 3: Create database scoped credential for managed identity
+    execute_sql "BillingAnalytics" \
+        "IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity') CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity WITH IDENTITY = 'Managed Identity'" \
+        "Creating database scoped credential"
     
-    # Grant permissions
-    echo "Granting permissions..."
-    PERM_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"}' 2>&1)
+    sleep 3
     
-    PERM_HTTP_CODE=$(echo "$PERM_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-    if [[ "$PERM_HTTP_CODE" == "200" ]] || [[ "$PERM_HTTP_CODE" == "201" ]] || [[ "$PERM_HTTP_CODE" == "202" ]]; then
-        echo "✅ Permissions granted (HTTP $PERM_HTTP_CODE)"
-    else
-        echo "❌ Permission grant failed (HTTP $PERM_HTTP_CODE)"
-    fi
+    # Step 4: Create external data source
+    execute_sql "BillingAnalytics" \
+        "IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
+        "Creating external data source"
     
-    sleep 5
+    sleep 3
     
-    # Create BillingData placeholder view (simplified approach that works)
-    echo "Creating BillingData placeholder view..."
+    # Step 5: Create user for service principal
+    execute_sql "BillingAnalytics" \
+        "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER" \
+        "Creating user wiv_account"
     
-    # First drop the view if it exists
-    DROP_VIEW_SQL="IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData"
+    sleep 3
     
-    curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": \"$DROP_VIEW_SQL\"}" \
-        -o /dev/null 2>&1
+    # Step 6: Grant permissions
+    execute_sql "BillingAnalytics" \
+        "ALTER ROLE db_datareader ADD MEMBER [wiv_account]" \
+        "Granting db_datareader role"
     
-    # Create placeholder view
-    PLACEHOLDER_SQL="CREATE VIEW BillingData AS SELECT 'No billing data available yet in storage account: $STORAGE_ACCOUNT_NAME' as Message, 'Container: $CONTAINER_NAME' as Container, GETDATE() as CheckedAt"
+    execute_sql "BillingAnalytics" \
+        "ALTER ROLE db_datawriter ADD MEMBER [wiv_account]" \
+        "Granting db_datawriter role"
     
-    PLACEHOLDER_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": \"$PLACEHOLDER_SQL\"}" 2>&1)
+    execute_sql "BillingAnalytics" \
+        "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]" \
+        "Granting db_ddladmin role"
     
-    PLACEHOLDER_HTTP_CODE=$(echo "$PLACEHOLDER_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-    if [[ "$PLACEHOLDER_HTTP_CODE" == "200" ]] || [[ "$PLACEHOLDER_HTTP_CODE" == "201" ]] || [[ "$PLACEHOLDER_HTTP_CODE" == "202" ]]; then
-        echo "✅ Placeholder view created successfully"
-        echo "   The view will be updated once billing data is exported to:"
-        echo "   Storage: $STORAGE_ACCOUNT_NAME"
-        echo "   Container: $CONTAINER_NAME"
-    else
-        echo "⚠️ Could not create view automatically (HTTP $PLACEHOLDER_HTTP_CODE)"
-    fi
-    fi  # End of DATABASE_CREATED check
+    sleep 3
+    
+    # Step 7: Create view for billing data
+    echo "  Creating BillingData view..."
+    
+    # First, drop existing view if it exists
+    execute_sql "BillingAnalytics" \
+        "IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData" \
+        "Dropping existing view"
+    
+    # Create the view with proper OPENROWSET
+    VIEW_SQL="CREATE VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK '${EXPORT_PATH}/**/*.csv',
+    DATA_SOURCE = 'BillingStorage',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    HEADER_ROW = TRUE
+) AS BillingExport"
+    
+    execute_sql "BillingAnalytics" "$VIEW_SQL" "Creating BillingData view"
     
     echo ""
-    echo "Database setup process completed"
-    
-    # Verify what was created
-    echo ""
-    echo "Verifying setup..."
-    echo -n "Checking database... "
-    DB_VERIFY=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "SELECT name FROM sys.databases WHERE name = '\''BillingAnalytics'\''"}' 2>/dev/null)
-    
-    if [[ "$DB_VERIFY" == *"BillingAnalytics"* ]]; then
-        echo "✅ Database exists"
-    else
-        echo "❌ Database NOT found"
-        echo "   Manual creation required in Synapse Studio"
-    fi
-    
-    echo -n "Checking view... "
-    VIEW_VERIFY=$(curl -s -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "SELECT name FROM sys.views WHERE name = '\''BillingData'\''"}' 2>/dev/null)
-    
-    if [[ "$VIEW_VERIFY" == *"BillingData"* ]]; then
-        echo "✅ View exists"
-    else
-        echo "❌ View NOT found"
-    fi
+    echo "✅ Database setup completed successfully!"
+    DATABASE_CREATED=true
     
 else
-    echo "⚠️ Could not get access token. Falling back to other methods..."
+    echo "❌ Failed to get access token"
+    DATABASE_CREATED=false
 fi
 
-# Continue with fallback methods
-echo "Executing additional setup methods..."
-SQL_SCRIPT="
--- Create database if not exists
+# ===========================
+# CREATE MANUAL SETUP SCRIPTS
+# ===========================
+
+# Create manual SQL script
+cat > synapse_billing_setup.sql <<EOF
+-- ========================================================
+-- SYNAPSE BILLING DATA SETUP (Manual)
+-- ========================================================
+-- Run this in Synapse Studio if automated setup fails
+-- Workspace: $SYNAPSE_WORKSPACE
+-- Storage Account: $STORAGE_ACCOUNT_NAME
+-- Container: $CONTAINER_NAME
+-- Export Path: $EXPORT_PATH
+
+-- Step 1: Create database
 IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
     CREATE DATABASE BillingAnalytics;
 GO
@@ -1223,793 +658,63 @@ GO
 USE BillingAnalytics;
 GO
 
--- Create master key
-IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd$(date +%s)!';
-GO
-
--- Create user for service principal
-IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
-BEGIN
-    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
-    PRINT 'Created user wiv_account';
-END
-GO
-
--- Grant permissions
-ALTER ROLE db_datareader ADD MEMBER [wiv_account];
-ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
-ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
-GO
-"
-
-# Save SQL to file
-echo "$SQL_SCRIPT" > /tmp/create_db_user_$$.sql
-
-# Execute using Azure Data Studio CLI or Synapse Studio REST API
-echo "Executing database setup..."
-
-# Method 1: Try using az synapse sql-script command
-echo "Method 1: Using Azure CLI Synapse commands..."
-
-# Create a SQL script in Synapse workspace
-SCRIPT_NAME="SetupDatabase_$(date +%s)"
-cat > /tmp/setup_db_$$.sql <<'SETUPSQL'
--- Create database
-IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
-    CREATE DATABASE BillingAnalytics;
-GO
-
-USE BillingAnalytics;
-GO
-
--- Create master key
+-- Step 2: Create master key
 IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
     CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd2024!';
 GO
 
--- Create user for service principal
+-- Step 3: Create database scoped credential for managed identity
+IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity')
+    CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity 
+    WITH IDENTITY = 'Managed Identity';
+GO
+
+-- Step 4: Create external data source
+IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage')
+    CREATE EXTERNAL DATA SOURCE BillingStorage
+    WITH (
+        LOCATION = 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/',
+        CREDENTIAL = WorkspaceIdentity
+    );
+GO
+
+-- Step 5: Create user for service principal
 IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
     CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
 GO
 
--- Grant permissions
-ALTER ROLE db_datareader ADD MEMBER [wiv_account];
-ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
-ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
-GO
-SETUPSQL
-
-# Create and execute the SQL script
-az synapse sql-script create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --name "$SCRIPT_NAME" \
-    --file /tmp/setup_db_$$.sql \
-    --resource-group "$BILLING_RG" \
-    --only-show-errors 2>/dev/null && echo "✅ SQL script created in Synapse"
-
-# Method 2 already handled above, skip duplicate
-
-# Method 3: Use Azure CLI with service principal context
-echo "Method 3: Granting Synapse Administrator role to service principal..."
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse Administrator" \
-    --assignee "$APP_ID" \
-    --only-show-errors 2>/dev/null && echo "✅ Synapse Administrator role granted"
-
-az synapse role assignment create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --role "Synapse SQL Administrator" \
-    --assignee "$APP_ID" \
-    --only-show-errors 2>/dev/null && echo "✅ Synapse SQL Administrator role granted"
-
-# Clean up
-rm -f /tmp/setup_db_$$.sql
-
-# Method 4: Create a Synapse pipeline to execute SQL
-echo "Method 4: Creating Synapse pipeline to execute SQL..."
-PIPELINE_NAME="SetupDatabasePipeline_$(date +%s)"
-
-# Create a pipeline definition
-cat > /tmp/pipeline_$$.json <<'PIPELINEJSON'
-{
-  "name": "SetupDatabasePipeline",
-  "properties": {
-    "activities": [
-      {
-        "name": "CreateDatabase",
-        "type": "SqlServerStoredProcedure",
-        "typeProperties": {
-          "storedProcedureName": "sp_executesql",
-          "storedProcedureParameters": {
-            "stmt": {
-              "value": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics",
-              "type": "String"
-            }
-          }
-        }
-      }
-    ]
-  }
-}
-PIPELINEJSON
-
-az synapse pipeline create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --name "$PIPELINE_NAME" \
-    --file /tmp/pipeline_$$.json \
-    --resource-group "$BILLING_RG" \
-    --only-show-errors 2>/dev/null && echo "✅ Pipeline created"
-
-rm -f /tmp/pipeline_$$.json
-
-echo "✅ Database setup attempted with multiple methods"
-
-# Clean up
-rm -f /tmp/create_db_user_$$.sql
-
-# Wait for changes to propagate
-sleep 10
-
-# Create and execute SQL script to set up database user
-echo "Setting up database user for service principal..."
-cat > /tmp/setup_db_user_$$.sql <<SQLEOF
--- Create database if not exists
-IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
-    CREATE DATABASE BillingAnalytics;
-GO
-
-USE BillingAnalytics;
-GO
-
--- Create master key if not exists
-IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd$(date +%s)!';
-GO
-
--- Create user for service principal (using app name)
-IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
-BEGIN
-    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
-    PRINT 'Created user wiv_account';
-END
-GO
-
--- Grant permissions
+-- Step 6: Grant permissions
 ALTER ROLE db_datareader ADD MEMBER [wiv_account];
 ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
 ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
 GO
 
-PRINT 'Database user configured successfully!';
-GO
-SQLEOF
-
-# Execute the SQL using az synapse sql pool command
-echo "Executing SQL to create database user..."
-az synapse sql script create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --name "SetupDatabaseUser" \
-    --file /tmp/setup_db_user_$$.sql \
-    --resource-group "$BILLING_RG" \
-    --only-show-errors 2>/dev/null || true
-
-# Also try to execute it directly
-az synapse sql pool list \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --query "[?name=='Built-in'].name" \
-    -o tsv 2>/dev/null || true
-
-# Clean up temp file
-rm -f /tmp/setup_db_user_$$.sql
-
-# Alternative: Use Azure user context to grant permissions
-echo "Granting database access to service principal..."
-
-# Get the current Azure user's access token for Synapse
-SYNAPSE_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-
-if [ -n "$SYNAPSE_TOKEN" ]; then
-    # Create SQL to grant permissions
-    GRANT_SQL="IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];"
-    
-    # Try to execute via REST API
-    curl -X POST \
-        "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $SYNAPSE_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": \"$GRANT_SQL\"}" \
-        --silent --output /dev/null 2>&1 || true
-fi
-
-echo "✅ Database and user setup completed"
-
-# Get Synapse workspace resource ID
-SYNAPSE_RESOURCE_ID=$(az synapse workspace show \
-    --name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --query id -o tsv)
-
-# Assign Contributor permission on the Synapse workspace only
-echo "🔐 Assigning Contributor permission on Synapse workspace..."
-az role assignment create \
-    --assignee "$APP_ID" \
-    --role "Contributor" \
-    --scope "$SYNAPSE_RESOURCE_ID" \
-    --only-show-errors
-
-echo "⏳ Waiting for Synapse workspace to be fully operational..."
-sleep 30
-
-# Note: Firewall rules have been moved to line 744 (right after Synapse workspace creation)
-# This ensures they are configured before database creation attempts
-
-# ===========================
-# SYNAPSE PERMISSIONS SETUP
-# ===========================
-echo ""
-echo "🔐 Configuring Synapse permissions for wiv_account..."
-echo "--------------------------------------"
-
-# Get the Object ID of the service principal (needed for Synapse role assignments)
-echo "🔍 Getting service principal Object ID..."
-SP_OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-echo "  - Service Principal Object ID: $SP_OBJECT_ID"
-
-# Get Synapse workspace resource ID
-SYNAPSE_RESOURCE_ID=$(az synapse workspace show \
-    --name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --query id -o tsv)
-
-# Note: The service principal that creates the workspace automatically has access
-# No additional Synapse roles needed for querying billing data
-echo "✅ Service principal has implicit access as workspace creator"
-
-# Configure Managed Identity authentication (NO TOKENS NEEDED!)
-echo ""
-echo "🔑 Configuring Managed Identity authentication (never expires!)..."
-
-# Grant the service principal access to the storage account
-echo "Setting up Storage Blob Data Reader permissions..."
-az role assignment create \
-    --role "Storage Blob Data Reader" \
-    --assignee "$SP_OBJECT_ID" \
-    --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
-    --only-show-errors 2>/dev/null || echo "⚠️  SP role may already be assigned"
-
-# Also grant Synapse workspace managed identity access
-SYNAPSE_IDENTITY=$(az synapse workspace show \
-    --name "$SYNAPSE_WORKSPACE" \
-    --resource-group "$BILLING_RG" \
-    --query "identity.principalId" \
-    --output tsv 2>/dev/null)
-
-if [ -n "$SYNAPSE_IDENTITY" ]; then
-    az role assignment create \
-        --role "Storage Blob Data Reader" \
-        --assignee "$SYNAPSE_IDENTITY" \
-        --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$BILLING_RG/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME" \
-        --only-show-errors 2>/dev/null || echo "⚠️  Synapse role may already be assigned"
-    echo "✅ Managed Identity configured - NO EXPIRATION, NO TOKENS!"
-fi
-
-# Create linked service for billing storage
-echo "🔗 Creating linked service to billing storage..."
-LINKED_SERVICE_NAME="BillingStorageLinkedService"
-
-# Get storage account key
-BILLING_STORAGE_KEY=$(az storage account keys list \
-    --resource-group "$BILLING_RG" \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --query '[0].value' -o tsv)
-
-# Create linked service JSON
-cat > linked_service.json <<EOF
-{
-  "name": "$LINKED_SERVICE_NAME",
-  "properties": {
-    "type": "AzureBlobStorage",
-    "typeProperties": {
-      "connectionString": "DefaultEndpointsProtocol=https;AccountName=$STORAGE_ACCOUNT_NAME;AccountKey=$BILLING_STORAGE_KEY;EndpointSuffix=core.windows.net"
-    }
-  }
-}
-EOF
-
-# Create the linked service
-az synapse linked-service create \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --name "$LINKED_SERVICE_NAME" \
-    --file @linked_service.json \
-    --only-show-errors
-
-# Clean up temp file
-rm linked_service.json
-
-# ===========================
-# CREATE EXTERNAL TABLE FOR BILLING DATA
-# ===========================
-echo ""
-echo "📊 Setting up billing data ingestion in Synapse..."
-echo "--------------------------------------"
-echo "📝 Creating external table setup script..."
-echo "🚀 Setting up billing data access in Synapse automatically..."
-
-# Add longer wait after Synapse creation
-echo ""
-echo "⏳ Waiting for Synapse workspace to fully initialize..."
-echo "   This takes 2-3 minutes for new workspaces..."
-sleep 60
-echo "   Still initializing... (1 minute elapsed)"
-sleep 60
-echo "   Almost ready... (2 minutes elapsed)"
-sleep 30
-echo "✅ Synapse workspace should be ready now!"
-
-echo ""
-echo "🔧 Setting up Synapse database and views automatically..."
-echo "Using sqlcmd with Azure AD authentication to create database and user..."
-
-# Generate a secure password for master key
-MASTER_KEY_PASSWORD="StrongP@ssw0rd$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)!"
-
-# First, create the database and user using sqlcmd with Azure AD auth
-# This uses YOUR Azure AD credentials, not the service principal
-echo "📝 Creating database setup SQL script..."
-cat > /tmp/setup_synapse_db_$$.sql <<SQLEOF
--- Create database if not exists
-IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
-    CREATE DATABASE BillingAnalytics;
+-- Step 7: Create view for billing data
+IF OBJECT_ID('BillingData', 'V') IS NOT NULL
+    DROP VIEW BillingData;
 GO
 
-USE BillingAnalytics;
-GO
-
--- Create master key
-IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
-GO
-
--- Create user for service principal (using wiv_account name)
-IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
-    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
-GO
-
--- Grant permissions
-ALTER ROLE db_datareader ADD MEMBER [wiv_account];
-ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
-ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
-GO
-
--- Create view for billing data
-CREATE OR ALTER VIEW BillingData AS
+CREATE VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
-    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
+    BULK '$EXPORT_PATH/**/*.csv',
+    DATA_SOURCE = 'BillingStorage',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     HEADER_ROW = TRUE
 ) AS BillingExport;
 GO
 
-SELECT 'Database setup complete!' as Status;
-GO
-SQLEOF
-
-# Skip sqlcmd in Cloud Shell - it doesn't work with Azure AD auth properly
-# Go directly to REST API method
-echo "📝 Using REST API to create database and user..."
-SETUP_COMPLETED=false
-
-# Use Azure CLI to get access token
-ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-
-if [ -n "$ACCESS_TOKEN" ]; then
-    echo "✅ Got Azure access token"
-    
-    # Create database
-    echo "Creating database..."
-    curl -s -X POST \
-        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '\''BillingAnalytics'\'') CREATE DATABASE BillingAnalytics"}' \
-        -o /dev/null 2>&1
-    
-    sleep 5
-    
-    # Create master key, user and grant permissions
-    echo "Creating user and granting permissions..."
-    SETUP_SQL="IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD'; IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER; ALTER ROLE db_datareader ADD MEMBER [wiv_account]; ALTER ROLE db_datawriter ADD MEMBER [wiv_account]; ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]"
-    
-    curl -s -X POST \
-        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": \"$SETUP_SQL\"}" \
-        -o /dev/null 2>&1
-    
-    # Also create the view
-    echo "Creating BillingData view..."
-    VIEW_SQL="CREATE OR ALTER VIEW BillingData AS SELECT * FROM OPENROWSET(BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv', FORMAT = 'CSV', PARSER_VERSION = '2.0', HEADER_ROW = TRUE) AS BillingExport"
-    
-    curl -s -X POST \
-        "https://${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\": \"$VIEW_SQL\"}" \
-        -o /dev/null 2>&1
-    
-    echo "✅ Database setup completed via REST API"
-    SETUP_COMPLETED=true
-else
-    echo "⚠️ Could not get Azure access token"
-    SETUP_COMPLETED=false
-fi
-
-# Clean up temp files
-rm -f /tmp/setup_synapse_db_$$.sql /tmp/sqlcmd_output_$$.txt 2>/dev/null
-
-# Skip Python fallback - keep it simple
-if [ "$SETUP_COMPLETED" = "false" ]; then
-    echo ""
-    echo "⚠️ Automated setup could not complete"
-    echo ""
-    echo "📝 Manual setup required:"
-    echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
-    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
-    echo "   3. Run the SQL from: synapse_billing_setup.sql"
-fi
-
-# The SQL backup script will be created later in the script
-# The Python fallback code has been removed to fix syntax errors
-# Python fallback section removed - it was causing syntax errors
-# The database creation is handled by the REST API calls above
-
-# Continue with the rest of the script
-if [ "$SETUP_COMPLETED" = "false" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-        # Check for required Python packages
-        if python3 -c "import pyodbc; import requests; import subprocess" 2>/dev/null; then
-            echo "📝 Executing Python fallback setup..."
-            
-            # Variable substitution for the Python script
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                # macOS sed syntax
-                sed -i '' "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
-                sed -i '' "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
-                sed -i '' "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
-                sed -i '' "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
-                sed -i '' "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
-                sed -i '' "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
-                sed -i '' "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
-                sed -i '' "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
-            else
-                # Linux sed syntax
-                sed -i "s/\$SYNAPSE_WORKSPACE/$SYNAPSE_WORKSPACE/g" setup_synapse_automated.py
-                sed -i "s/\$TENANT_ID/$TENANT_ID/g" setup_synapse_automated.py
-                sed -i "s/\$APP_ID/$APP_ID/g" setup_synapse_automated.py
-                sed -i "s/\$CLIENT_SECRET/$CLIENT_SECRET/g" setup_synapse_automated.py
-                sed -i "s/\$STORAGE_ACCOUNT_NAME/$STORAGE_ACCOUNT_NAME/g" setup_synapse_automated.py
-                sed -i "s/\$CONTAINER_NAME/$CONTAINER_NAME/g" setup_synapse_automated.py
-                sed -i "s/\$EXPORT_PATH/$EXPORT_PATH/g" setup_synapse_automated.py
-                sed -i "s/\$MASTER_KEY_PASSWORD/$MASTER_KEY_PASSWORD/g" setup_synapse_automated.py
-            fi
-            
-            # Execute the Python script
-            python3 setup_synapse_automated.py
-            SETUP_COMPLETED=$?
-            
-            # Clean up
-            rm -f setup_synapse_automated.py
-            
-            if [ $SETUP_COMPLETED -eq 0 ]; then
-                echo "✅ Database setup completed via Python fallback!"
-            else
-                echo "⚠️ Python fallback had issues, but database may still be partially configured"
-            fi
-        else
-            echo "⚠️ Required Python packages not available for fallback setup"
-            echo "   Please install: pip install pyodbc requests"
-        fi
-    else
-        echo "⚠️ Python not available for fallback setup"
-    fi
-fi  # End of SETUP_COMPLETED check
-
-# Continue with the rest of the script regardless of setup method
-
-# ===========================
-# FINAL SETUP STATUS
-# ===========================
-if [ "$SETUP_COMPLETED" != "true" ]; then
-    echo ""
-    echo "⚠️ Automated database setup could not complete"
-    echo ""
-    echo "📝 Manual setup required:"
-    echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
-    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
-    echo "   3. Go to Develop → SQL scripts → New SQL script"
-    echo "   4. Run the SQL from: synapse_billing_setup.sql"
-    echo ""
-    echo "   This only needs to be done once. After that, the service principal will work."
-fi
-
-# Create backup SQL script for manual execution
-cat > synapse_billing_setup.sql <<EOF
--- ========================================================
-        
-        if [ -n "$ACCESS_TOKEN" ]; then
-            # Try to create database using REST API
-            CREATE_DB_RESPONSE=$(curl -s -X POST \
-                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
-                -H "Authorization: Bearer $ACCESS_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{"query": "CREATE DATABASE BillingAnalytics"}' 2>/dev/null)
-            
-            # Create the view with the improved deduplication
-            CREATE_VIEW_SQL=$(cat <<-EOSQL
-                USE BillingAnalytics;
-                CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
-                CREATE VIEW BillingData AS
-                WITH LatestExport AS (
-                    SELECT MAX(filepath(1)) as LatestPath
-                    FROM OPENROWSET(
-                        BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
-                        FORMAT = 'CSV',
-                        PARSER_VERSION = '2.0',
-                        FIRSTROW = 2
-                    ) AS files
-                )
-                SELECT *
-                FROM OPENROWSET(
-                    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
-                    FORMAT = 'CSV',
-                    PARSER_VERSION = '2.0',
-                    FIRSTROW = 2
-                )
-                WITH (
-                    date NVARCHAR(100),
-                    serviceFamily NVARCHAR(200),
-                    meterCategory NVARCHAR(200),
-                    meterSubCategory NVARCHAR(200),
-                    meterName NVARCHAR(500),
-                    billingAccountName NVARCHAR(200),
-                    costCenter NVARCHAR(100),
-                    resourceGroupName NVARCHAR(200),
-                    resourceLocation NVARCHAR(100),
-                    consumedService NVARCHAR(200),
-                    ResourceId NVARCHAR(1000),
-                    chargeType NVARCHAR(100),
-                    publisherType NVARCHAR(100),
-                    quantity NVARCHAR(100),
-                    costInBillingCurrency NVARCHAR(100),
-                    costInUsd NVARCHAR(100),
-                    PayGPrice NVARCHAR(100),
-                    billingCurrency NVARCHAR(10),
-                    subscriptionName NVARCHAR(200),
-                    SubscriptionId NVARCHAR(100),
-                    ProductName NVARCHAR(500),
-                    frequency NVARCHAR(100),
-                    unitOfMeasure NVARCHAR(100),
-                    tags NVARCHAR(4000)
-                ) AS BillingData
-                WHERE filepath(1) = (SELECT LatestPath FROM LatestExport);
-EOSQL
-            )
-            
-            # Try to create the view
-            CREATE_VIEW_RESPONSE=$(curl -s -X POST \
-                "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
-                -H "Authorization: Bearer $ACCESS_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"query\": \"$CREATE_VIEW_SQL\"}" 2>/dev/null)
-            
-            if [[ "$CREATE_VIEW_RESPONSE" == *"success"* ]] || [[ -z "$CREATE_VIEW_RESPONSE" ]]; then
-                echo "✅ Database and view might have been created via REST API"
-                SETUP_COMPLETED=true
-            fi
-        fi
-    fi
-    
-    # Method 3: Install sqlcmd and retry
-    if [ "$SETUP_COMPLETED" != "true" ] && ! command -v sqlcmd >/dev/null 2>&1; then
-        echo "📝 Method 3: Installing sqlcmd and retrying..."
-        
-        # Try to install sqlcmd based on OS
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS
-            if command -v brew >/dev/null 2>&1; then
-                brew install sqlcmd 2>/dev/null && \
-                sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
-                       -d master \
-                       -U "$APP_ID" \
-                       -P "$CLIENT_SECRET" \
-                       -G \
-                       -Q "CREATE DATABASE BillingAnalytics" 2>/dev/null && \
-                SETUP_COMPLETED=true
-            fi
-        elif command -v apt-get >/dev/null 2>&1; then
-            # Ubuntu/Debian
-            curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add - 2>/dev/null
-            curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list >/dev/null
-            sudo apt-get update >/dev/null 2>&1
-            sudo ACCEPT_EULA=Y apt-get install -y mssql-tools >/dev/null 2>&1
-            export PATH="$PATH:/opt/mssql-tools/bin"
-            
-            if command -v sqlcmd >/dev/null 2>&1; then
-                sqlcmd -S "$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net" \
-                       -d master \
-                       -U "$APP_ID" \
-                       -P "$CLIENT_SECRET" \
-                       -G \
-                       -Q "CREATE DATABASE BillingAnalytics" 2>/dev/null && \
-                SETUP_COMPLETED=true
-            fi
-        fi
-    fi
-    
-    # Method 4: Create a verification script
-    if [ "$SETUP_COMPLETED" != "true" ]; then
-        echo "📝 Method 4: Creating automated completion script..."
-        
-        cat > complete_synapse_setup.sh <<-EOSCRIPT
-#!/bin/bash
-# Auto-generated script to complete Synapse setup
-# Run this after the main script if database creation failed
-
-SYNAPSE_WORKSPACE="$SYNAPSE_WORKSPACE"
-APP_ID="$APP_ID"
-CLIENT_SECRET="$CLIENT_SECRET"
-STORAGE_ACCOUNT_NAME="$STORAGE_ACCOUNT_NAME"
-MASTER_KEY_PASSWORD="$MASTER_KEY_PASSWORD"
-
-echo "🔧 Attempting to complete Synapse setup..."
-
-# Try with Python if available
-if command -v python3 >/dev/null 2>&1; then
-    pip3 install pyodbc 2>/dev/null || pip install pyodbc 2>/dev/null
-    python3 -c "
-import pyodbc
-conn_str = f'DRIVER={{ODBC Driver 18 for SQL Server}};SERVER=$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net;DATABASE=master;UID=$APP_ID;PWD=$CLIENT_SECRET;Authentication=ActiveDirectoryServicePrincipal;Encrypt=yes;TrustServerCertificate=no;'
-try:
-    conn = pyodbc.connect(conn_str, autocommit=True)
-    cursor = conn.cursor()
-    cursor.execute('CREATE DATABASE BillingAnalytics')
-    print('✅ Database created!')
-except Exception as e:
-    print(f'Database might already exist: {e}')
-"
-fi
-
-echo "✅ To complete setup manually, run the SQL from synapse_billing_setup.sql in Synapse Studio"
-echo "   URL: https://web.azuresynapse.net"
-EOSCRIPT
-        chmod +x complete_synapse_setup.sh
-        echo "   ✅ Created: complete_synapse_setup.sh"
-        echo "   Run it with: ./complete_synapse_setup.sh"
-    fi
-fi
-
-# Final status check
-if [ "$SETUP_COMPLETED" = "true" ]; then
-    echo ""
-    echo "✅ Database and view setup completed automatically!"
-else
-    echo ""
-    echo "⚠️  Automated database creation was not successful."
-    echo ""
-    echo "📝 IMPORTANT: Complete setup using ONE of these methods:"
-    echo ""
-    echo "   Option 1: Run the completion script"
-    echo "   ./complete_synapse_setup.sh"
-    echo ""
-    echo "   Option 2: Use Synapse Studio (Web UI)"
-    echo "   1. Open: https://web.azuresynapse.net"
-    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
-    echo "   3. Run SQL from: synapse_billing_setup.sql"
-    echo ""
-    echo "   Option 3: Install sqlcmd and run:"
-    echo "   sqlcmd -S $SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net -U $APP_ID -P '$CLIENT_SECRET' -G -i synapse_billing_setup.sql"
-    echo ""
-    echo "⚠️  The system is 90% ready but REQUIRES the database/view creation to work!"
-fi
-
-# Save manual setup script as backup
-cat > synapse_billing_setup.sql <<EOF
--- ========================================================
--- SYNAPSE BILLING DATA SETUP (Manual Backup)
--- ========================================================
--- Auto-generated on: $(date)
--- This is a backup if automated setup fails
--- Run this in Synapse Studio connected to Built-in serverless SQL pool
--- Workspace: $SYNAPSE_WORKSPACE
--- Storage Account: $STORAGE_ACCOUNT_NAME
--- Container: $CONTAINER_NAME
-
-CREATE DATABASE BillingAnalytics;
-GO
-USE BillingAnalytics;
-GO
-
-CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD';
-GO
-
--- Create database user for the service principal (using wiv_account name)
-CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
-GO
-
--- Grant necessary permissions
-ALTER ROLE db_datareader ADD MEMBER [wiv_account];
-ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
-ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
-GO
-
--- Improved view that automatically queries only the latest export file
--- This prevents data duplication since each export contains cumulative month-to-date data
--- Using Managed Identity with abfss:// protocol (NEVER EXPIRES!)
--- Storage Configuration:
---   Account: $STORAGE_ACCOUNT_NAME
---   Container: $CONTAINER_NAME
---   Export Path: $EXPORT_PATH
-CREATE VIEW BillingData AS
-WITH LatestExport AS (
-    -- Find the most recent export file
-    SELECT MAX(filepath(1)) as LatestPath
-    FROM OPENROWSET(
-        BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
-        FORMAT = 'CSV',
-        PARSER_VERSION = '2.0',
-        FIRSTROW = 2
-    ) AS files
-)
-SELECT *
-FROM OPENROWSET(
-    BULK 'abfss://$CONTAINER_NAME@$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$EXPORT_PATH/*/*.csv',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    FIRSTROW = 2
-)
-WITH (
-    date NVARCHAR(100),
-    serviceFamily NVARCHAR(200),
-    meterCategory NVARCHAR(200),
-    meterSubCategory NVARCHAR(200),
-    meterName NVARCHAR(500),
-    billingAccountName NVARCHAR(200),
-    costCenter NVARCHAR(100),
-    resourceGroupName NVARCHAR(200),
-    resourceLocation NVARCHAR(100),
-    consumedService NVARCHAR(200),
-    ResourceId NVARCHAR(1000),
-    chargeType NVARCHAR(100),
-    publisherType NVARCHAR(100),
-    quantity NVARCHAR(100),
-    costInBillingCurrency NVARCHAR(100),
-    costInUsd NVARCHAR(100),
-    PayGPrice NVARCHAR(100),
-    billingCurrency NVARCHAR(10),
-    subscriptionName NVARCHAR(200),
-    SubscriptionId NVARCHAR(100),
-    ProductName NVARCHAR(500),
-    frequency NVARCHAR(100),
-    unitOfMeasure NVARCHAR(100),
-    tags NVARCHAR(4000)
-) AS BillingData
-WHERE filepath(1) = (SELECT LatestPath FROM LatestExport);
+-- Test the view
+SELECT TOP 10 * FROM BillingData;
 GO
 EOF
 
-echo "✅ Manual backup script saved to: synapse_billing_setup.sql"
+echo "✅ Manual SQL script saved to: synapse_billing_setup.sql"
 
-# Save Python remote query client configuration
+# Create Python configuration
 cat > synapse_config.py <<EOF
-# Auto-generated Synapse configuration
-# Created: $(date)
-
+# Synapse Configuration
 SYNAPSE_CONFIG = {
     'tenant_id': '$TENANT_ID',
     'client_id': '$APP_ID',
@@ -2019,13 +724,11 @@ SYNAPSE_CONFIG = {
     'storage_account': '$STORAGE_ACCOUNT_NAME',
     'container': '$CONTAINER_NAME',
     'export_path': '$EXPORT_PATH',
-    'storage_subscription': '$STORAGE_SUBSCRIPTION',
-    'storage_resource_group': '$STORAGE_RG',
     'resource_group': '$BILLING_RG',
     'subscription_id': '$APP_SUBSCRIPTION_ID'
 }
 
-# Connection string for ODBC
+# Connection string for pyodbc
 CONNECTION_STRING = f"""
 DRIVER={{ODBC Driver 18 for SQL Server}};
 SERVER={SYNAPSE_CONFIG['workspace_name']}-ondemand.sql.azuresynapse.net;
@@ -2038,246 +741,96 @@ TrustServerCertificate=no;
 """
 
 print("Synapse Configuration:")
-print(f"  Workspace: {SYNAPSE_CONFIG['workspace_name']}")
-print(f"  Storage: {SYNAPSE_CONFIG['storage_account']}")
-print(f"  Database: {SYNAPSE_CONFIG['database_name']}")
-print(f"  Client ID: {SYNAPSE_CONFIG['client_id']}")
+for key, value in SYNAPSE_CONFIG.items():
+    if key != 'client_secret':
+        print(f"  {key}: {value}")
 EOF
 
 echo "✅ Python configuration saved to: synapse_config.py"
 
-# Save query for reference
+# Create sample queries
 cat > billing_queries.sql <<EOF
--- ========================================================
--- BILLING DATA QUERIES - OPTIMIZED VERSION
--- ========================================================
--- The BillingData view now AUTOMATICALLY prevents duplication!
--- No need for complex CTE patterns - just query the view directly
---
--- Background: Each daily export contains cumulative month-to-date data
--- The improved view automatically filters to only the latest export file
--- This means you get accurate, non-duplicated data with simple queries
--- ========================================================
+-- Sample Billing Queries for Synapse
 
--- 1. Simple query - automatically gets latest data without duplication
-SELECT * FROM BillingAnalytics.dbo.BillingData
-WHERE CAST(Date AS DATE) >= DATEADD(day, -7, GETDATE())
+-- 1. Test connection and view
+SELECT TOP 10 * FROM BillingAnalytics.dbo.BillingData;
 
--- 2. Query specific date range
--- Replace '2024-08-01' and '2024-08-10' with your desired dates
-SELECT * FROM BillingAnalytics.dbo.BillingData
-WHERE CAST(Date AS DATE) BETWEEN '2024-08-01' AND '2024-08-10'
-
--- 3. Daily cost summary for last 7 days
+-- 2. Daily cost summary
 SELECT 
     CAST(Date AS DATE) as BillingDate,
     ServiceFamily,
     ResourceGroupName,
-    SUM(CAST(CostInUSD AS FLOAT)) as TotalCostUSD,
-    COUNT(DISTINCT ResourceId) as ResourceCount
+    SUM(TRY_CAST(CostInUSD AS FLOAT)) as TotalCostUSD
 FROM BillingAnalytics.dbo.BillingData
-WHERE CAST(Date AS DATE) BETWEEN DATEADD(day, -7, GETDATE()) AND GETDATE()
+WHERE TRY_CAST(Date AS DATE) >= DATEADD(day, -7, GETDATE())
 GROUP BY CAST(Date AS DATE), ServiceFamily, ResourceGroupName
-ORDER BY BillingDate DESC
+ORDER BY BillingDate DESC;
 
--- 4. Compare costs between two date ranges
-WITH CurrentWeek AS (
-    SELECT 
-        ServiceFamily,
-        SUM(CAST(CostInUSD AS FLOAT)) as CurrentCost
-    FROM BillingAnalytics.dbo.BillingData
-    WHERE CAST(Date AS DATE) BETWEEN DATEADD(day, -7, GETDATE()) AND GETDATE()
-    GROUP BY ServiceFamily
-),
-PreviousWeek AS (
-    SELECT 
-        ServiceFamily,
-        SUM(CAST(CostInUSD AS FLOAT)) as PreviousCost
-    FROM BillingAnalytics.dbo.BillingData
-    WHERE CAST(Date AS DATE) BETWEEN DATEADD(day, -14, GETDATE()) AND DATEADD(day, -8, GETDATE())
-    GROUP BY ServiceFamily
-)
-SELECT 
-    COALESCE(c.ServiceFamily, p.ServiceFamily) as ServiceFamily,
-    ISNULL(p.PreviousCost, 0) as LastWeekCost,
-    ISNULL(c.CurrentCost, 0) as ThisWeekCost,
-    ISNULL(c.CurrentCost, 0) - ISNULL(p.PreviousCost, 0) as CostChange,
-    CASE 
-        WHEN p.PreviousCost > 0 
-        THEN ((c.CurrentCost - p.PreviousCost) / p.PreviousCost * 100)
-        ELSE 0 
-    END as PercentChange
-FROM CurrentWeek c
-FULL OUTER JOIN PreviousWeek p ON c.ServiceFamily = p.ServiceFamily
-ORDER BY ThisWeekCost DESC
-
--- 5. Monthly cost by day (for charting)
-SELECT 
-    CAST(Date AS DATE) as BillingDate,
-    SUM(CAST(CostInUSD AS FLOAT)) as DailyCost,
-    SUM(SUM(CAST(CostInUSD AS FLOAT))) OVER (ORDER BY CAST(Date AS DATE)) as CumulativeCost
+-- 3. Top spending services
+SELECT TOP 10
+    ServiceFamily,
+    SUM(TRY_CAST(CostInUSD AS FLOAT)) as TotalCost
 FROM BillingAnalytics.dbo.BillingData
-WHERE MONTH(CAST(Date AS DATE)) = MONTH(GETDATE())
-  AND YEAR(CAST(Date AS DATE)) = YEAR(GETDATE())
-GROUP BY CAST(Date AS DATE)
-ORDER BY BillingDate
+GROUP BY ServiceFamily
+ORDER BY TotalCost DESC;
 EOF
 
-echo "✅ Query templates saved to: billing_queries.sql"
-
-# Test the connection by running a simple query
-echo "🔍 Testing Synapse connection with a sample query..."
-az synapse sql query \
-    --workspace-name "$SYNAPSE_WORKSPACE" \
-    --query "SELECT 'Connection successful' as Status, GETDATE() as CurrentTime" \
-    --only-show-errors 2>/dev/null || echo "ℹ️  Note: Direct SQL execution requires additional setup. Use Synapse Studio for now."
-
-echo ""
-echo "✅ Billing data access is ready!"
-echo "📊 The queries in 'billing_queries.sql' can be run directly in Synapse Studio"
-echo "   No additional setup needed - serverless SQL pool can query the CSV files directly!"
-
-# Note: Billing export was already triggered earlier in the script
-# It should be running in the background and data may already be available
+echo "✅ Sample queries saved to: billing_queries.sql"
 
 # ===========================
-# CHECK DATA AVAILABILITY AND UPDATE VIEW
+# FINAL OUTPUT
 # ===========================
 echo ""
-echo "📊 Checking if billing data is available..."
-echo ""
-echo "The billing export was triggered earlier and may have completed by now."
-echo "To update the BillingData view with actual data once CSV files are available:"
-echo ""
-echo "1. Open Synapse Studio: https://web.azuresynapse.net"
-echo "2. Select workspace: $SYNAPSE_WORKSPACE"
-echo "3. Go to 'Develop' → 'SQL scripts' → 'New SQL script'"
-echo "4. Run this SQL to update the view:"
-echo ""
-echo "--------------------------- UPDATE VIEW SQL ---------------------------"
-echo "USE BillingAnalytics;"
-echo "GO"
-echo ""
-echo "-- Drop the placeholder view"
-echo "DROP VIEW BillingData;"
-echo "GO"
-echo ""
-echo "-- Create view with actual data"
-echo "CREATE VIEW BillingData AS"
-echo "SELECT * FROM OPENROWSET("
-echo "    BULK 'https://$STORAGE_ACCOUNT_NAME.dfs.core.windows.net/$CONTAINER_NAME/**/*.csv',"
-echo "    FORMAT = 'CSV',"
-echo "    PARSER_VERSION = '2.0',"
-echo "    HEADER_ROW = TRUE"
-echo ") AS BillingExport;"
-echo "GO"
-echo ""
-echo "-- Test the view"
-echo "SELECT TOP 10 * FROM BillingData;"
-echo "GO"
-echo "-----------------------------------------------------------------------"
-echo ""
-echo "💡 Tip: Data typically appears within 5-30 minutes after export trigger"
-echo "   If no data yet, wait a bit longer and try again"
-echo ""
-
-# Optional: Microsoft Graph permissions
-echo ""
-read -p "Do you want to grant Microsoft Graph permissions (e.g., Directory.Read.All)? (y/n): " GRANT_PERMS
-
-if [[ "$GRANT_PERMS" =~ ^[Yy]$ ]]; then
-    echo "📘 Granting Microsoft Graph permissions..."
-
-    echo "🔹 Adding Directory.Read.All permission..."
-    az ad app permission add \
-        --id "$APP_ID" \
-        --api 00000003-0000-0000-c000-000000000000 \
-        --api-permissions 7ab1d382-f21e-4acd-a863-ba3e13f7da61=Role
-
-    echo "🔹 Granting the permission..."
-    az ad app permission grant \
-        --id "$APP_ID" \
-        --api 00000003-0000-0000-c000-000000000000 \
-        --scope "https://graph.microsoft.com/Directory.Read.All"
-
-    echo "🔹 Requesting admin consent..."
-    az ad app permission admin-consent --id "$APP_ID"
-    if [ $? -eq 0 ]; then
-        echo "✅ Admin consent granted successfully."
-    else
-        echo "⚠️  Admin consent failed. You may need to manually grant consent via Azure Portal."
-    fi
-else
-    echo "🚫 Skipping Microsoft Graph permission grant."
-fi
-
-# Final output
-echo ""
+echo "============================================================"
 echo "✅ Azure Onboarding with Billing Export and Synapse Complete"
 echo "============================================================"
-echo "📄 Tenant ID:                $TENANT_ID"
-echo "📄 App (Client) ID:          $APP_ID"
-echo "📄 Client Secret:            $CLIENT_SECRET"
+echo ""
+echo "📄 Service Principal Credentials:"
+echo "   Tenant ID:        $TENANT_ID"
+echo "   App (Client) ID:  $APP_ID"
+echo "   Client Secret:    $CLIENT_SECRET"
 echo ""
 echo "💾 Storage Configuration:"
-if [ "$USE_EXISTING_STORAGE" = "true" ]; then
-    echo "   - Using Existing Storage: YES"
-    echo "   - Storage Subscription:   $STORAGE_SUBSCRIPTION"
-    echo "   - Storage Resource Group: $STORAGE_RG"
-else
-    echo "   - Resource Group:         $BILLING_RG"
-fi
-echo "   - Storage Account:        $STORAGE_ACCOUNT_NAME"
-echo "   - Container:              $CONTAINER_NAME"
-echo "   - Export Path:            $EXPORT_PATH"
-if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
-    echo "   - Export Name:            $EXPORT_NAME"
-fi
+echo "   Resource Group:   $BILLING_RG"
+echo "   Storage Account:  $STORAGE_ACCOUNT_NAME"
+echo "   Container:        $CONTAINER_NAME"
+echo "   Export Path:      $EXPORT_PATH"
 echo ""
 echo "🔷 Synapse Configuration:"
-echo "   - Workspace:              $SYNAPSE_WORKSPACE"
-echo "   - SQL Endpoint:           $SYNAPSE_WORKSPACE.sql.azuresynapse.net"
-echo "   - SQL Admin User:         $SQL_ADMIN_USER"
-echo "   - SQL Admin Password:     $SQL_ADMIN_PASSWORD"
-echo "   - Data Lake Storage:      $SYNAPSE_STORAGE"
-echo ""
-echo "🔐 AUTHENTICATION:"
-echo "   ✨ Managed Identity with abfss:// protocol"
-echo "   ✅ NO TOKENS, NO EXPIRATION, NO MAINTENANCE!"
-echo ""
-echo "📄 Assigned Roles:"
-echo "   - Cost Management Reader"
-echo "   - Monitoring Reader"
-echo "   - Storage Blob Data Reader (for Managed Identity)"
-echo "   - Storage Blob Data Contributor"
-echo "   - Contributor"
-echo "   - Synapse Administrator"
-echo "   - Synapse SQL Administrator"
-echo "   - Synapse Contributor"
-echo ""
-echo "📝 Next Steps:"
-if [ "$SETUP_COMPLETED" = "true" ]; then
-    echo "   1. ✅ Synapse database automatically configured with Managed Identity"
-    echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
-    echo "   3. Query data: SELECT * FROM BillingAnalytics.dbo.BillingData"
-    echo "      ℹ️  View automatically filters to latest export (no duplication!)"
-    echo "   4. Access Synapse Studio: https://web.azuresynapse.net"
-else
-    echo "   1. ⚠️  Database/View creation pending - Run: ./complete_synapse_setup.sh"
-    echo "   2. ✅ NO TOKEN RENEWAL NEEDED - Using Managed Identity!"
-    echo "   3. After setup, query: SELECT * FROM BillingAnalytics.dbo.BillingData"
-    echo "   4. Or complete in Synapse Studio: https://web.azuresynapse.net"
+echo "   Workspace:        $SYNAPSE_WORKSPACE"
+echo "   SQL Endpoint:     ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
+if [ -n "$SQL_ADMIN_USER" ]; then
+    echo "   SQL Admin User:   $SQL_ADMIN_USER"
+    echo "   SQL Admin Pass:   $SQL_ADMIN_PASSWORD"
 fi
 echo ""
-echo "📊 Generated files:"
-echo "   - billing_queries.sql: Ready-to-use Synapse queries"
-echo "   - synapse_billing_setup.sql: Manual SQL script (if automation fails)"
-echo "   - synapse_config.py: Python configuration for remote queries"
+
+if [ "$DATABASE_CREATED" = "true" ]; then
+    echo "✅ Database Status: CREATED AND CONFIGURED"
+    echo ""
+    echo "📝 Next Steps:"
+    echo "   1. Wait 5-30 minutes for billing data to be exported"
+    echo "   2. Open Synapse Studio: https://web.azuresynapse.net"
+    echo "   3. Select workspace: $SYNAPSE_WORKSPACE"
+    echo "   4. Run queries from: billing_queries.sql"
+    echo ""
+    echo "   Query example:"
+    echo "   SELECT TOP 10 * FROM BillingAnalytics.dbo.BillingData"
+else
+    echo "⚠️  Database Status: MANUAL SETUP REQUIRED"
+    echo ""
+    echo "📝 Complete setup manually:"
+    echo "   1. Open Synapse Studio: https://web.azuresynapse.net"
+    echo "   2. Select workspace: $SYNAPSE_WORKSPACE"
+    echo "   3. Go to 'Develop' → 'SQL scripts' → 'New SQL script'"
+    echo "   4. Connect to: 'Built-in' serverless SQL pool"
+    echo "   5. Copy and run the SQL from: synapse_billing_setup.sql"
+fi
+
 echo ""
-echo "🚀 Managed Identity Benefits:"
-echo "   ✅ NEVER EXPIRES - Works forever without maintenance"
-echo "   ✅ NO TOKENS - No SAS tokens or keys to manage"
-echo "   ✅ MORE SECURE - Azure native authentication"
-echo "   ✅ AUTOMATIC - Direct access via abfss:// protocol"
-echo "   ✅ BEST PRACTICE - Microsoft recommended approach"
+echo "📊 Generated Files:"
+echo "   - synapse_billing_setup.sql : Manual setup SQL script"
+echo "   - synapse_config.py         : Python configuration"
+echo "   - billing_queries.sql       : Sample queries"
+echo ""
 echo "============================================================"
