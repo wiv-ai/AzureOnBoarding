@@ -947,20 +947,31 @@ if [ -n "$ACCESS_TOKEN" ]; then
     echo ""
     echo "Verifying setup..."
     echo -n "Checking database... "
-    curl -s -X POST \
+    DB_VERIFY=$(curl -s -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "SELECT name FROM sys.databases WHERE name = '\''BillingAnalytics'\''"}' \
-        -o /tmp/db_check.json 2>/dev/null && echo "✅" || echo "⚠️"
+        -d '{"query": "SELECT name FROM sys.databases WHERE name = '\''BillingAnalytics'\''"}' 2>/dev/null)
+    
+    if [[ "$DB_VERIFY" == *"BillingAnalytics"* ]]; then
+        echo "✅ Database exists"
+    else
+        echo "❌ Database NOT found"
+        echo "   Manual creation required in Synapse Studio"
+    fi
     
     echo -n "Checking view... "
-    curl -s -X POST \
+    VIEW_VERIFY=$(curl -s -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/BillingAnalytics/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"query": "SELECT name FROM sys.views WHERE name = '\''BillingData'\''"}' \
-        -o /tmp/view_check.json 2>/dev/null && echo "✅" || echo "⚠️"
+        -d '{"query": "SELECT name FROM sys.views WHERE name = '\''BillingData'\''"}' 2>/dev/null)
+    
+    if [[ "$VIEW_VERIFY" == *"BillingData"* ]]; then
+        echo "✅ View exists"
+    else
+        echo "❌ View NOT found"
+    fi
     
 else
     echo "⚠️ Could not get access token. Falling back to other methods..."
