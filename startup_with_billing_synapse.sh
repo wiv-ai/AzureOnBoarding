@@ -754,6 +754,17 @@ az synapse role assignment create \
     --assignee "$APP_ID" \
     --only-show-errors 2>/dev/null || echo "  Synapse SQL Administrator role may already exist"
 
+# Also grant Synapse Administrator role to the current Azure user
+CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
+if [ -n "$CURRENT_USER_ID" ]; then
+    echo "🔐 Granting Synapse Administrator role to current user..."
+    az synapse role assignment create \
+        --workspace-name "$SYNAPSE_WORKSPACE" \
+        --role "Synapse Administrator" \
+        --assignee "$CURRENT_USER_ID" \
+        --only-show-errors 2>/dev/null || echo "  Current user may already have Synapse Administrator role"
+fi
+
 # Wait for role assignments to propagate
 echo "⏳ Waiting for Synapse role assignments to propagate (30 seconds)..."
 sleep 30
@@ -765,34 +776,32 @@ echo "🔧 Creating BillingAnalytics database and configuring permissions..."
 # Direct REST API approach optimized for Cloud Shell
 echo "Setting up database using REST API (optimized for Cloud Shell)..."
 
-# Try service principal authentication first, then fall back to Azure CLI
-echo "Getting authentication token..."
+# Use Azure CLI token for Synapse serverless SQL operations
+# Service principals have limitations with serverless SQL pools
+echo "Getting Azure CLI authentication token..."
 
-# Method 1: Try service principal token
-SP_TOKEN_RESPONSE=$(curl -s -X POST \
-    "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "client_id=$APP_ID&client_secret=$CLIENT_SECRET&scope=https://database.windows.net/.default&grant_type=client_credentials" 2>/dev/null)
+ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
 
-if [[ "$SP_TOKEN_RESPONSE" == *"access_token"* ]]; then
-    ACCESS_TOKEN=$(echo "$SP_TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
-    echo "✅ Got service principal access token"
-    AUTH_METHOD="ServicePrincipal"
+if [ -n "$ACCESS_TOKEN" ]; then
+    echo "✅ Got Azure CLI access token"
+    AUTH_METHOD="AzureCLI"
+    
+    # Important: The user running this script needs to be a Synapse Administrator
+    echo "   Note: Using your Azure user account for database creation"
+    echo "   You must be a Synapse Administrator on workspace: $SYNAPSE_WORKSPACE"
 else
-    # Method 2: Fall back to Azure CLI token (Cloud Shell user)
-    echo "   Service principal auth failed, trying Azure CLI..."
-    ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-    if [ -n "$ACCESS_TOKEN" ]; then
-        echo "✅ Got Azure CLI access token"
-        AUTH_METHOD="AzureCLI"
-    fi
+    echo "❌ Failed to get Azure CLI token"
+    echo "   Please ensure you're logged in with: az login"
+    AUTH_METHOD="None"
 fi
 
 if [ -n "$ACCESS_TOKEN" ]; then
     echo "   Using authentication: $AUTH_METHOD"
     
-    # Create database - use CREATE instead of IF NOT EXISTS for clearer error
+    # Create database - use simple CREATE DATABASE for Synapse serverless
     echo "Creating database BillingAnalytics..."
+    
+    # Synapse serverless SQL pool uses simple syntax
     DB_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
         "https://$SYNAPSE_WORKSPACE-ondemand.sql.azuresynapse.net/sql/databases/master/query" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
