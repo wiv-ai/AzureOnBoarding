@@ -328,37 +328,16 @@ EXPORT_RESPONSE=$(az rest --method PUT \
       }
     },
     "definition": {
-      "type": "ActualCost",
+      "type": "FocusCost",
       "timeframe": "MonthToDate",
       "dataSet": {
         "granularity": "Daily",
         "configuration": {
-          "columns": [
-            "Date",
-            "ServiceFamily",
-            "MeterCategory",
-            "MeterSubcategory",
-            "MeterName",
-            "ResourceGroup",
-            "ResourceLocation",
-            "ConsumedService",
-            "ResourceId",
-            "ChargeType",
-            "PublisherType",
-            "Quantity",
-            "CostInBillingCurrency",
-            "CostInUSD",
-            "BillingCurrencyCode",
-            "SubscriptionName",
-            "SubscriptionId",
-            "ProductName",
-            "Frequency",
-            "UnitOfMeasure",
-            "Tags"
-          ]
+          "dataVersion": "1.0"
         }
       }
-    }
+    },
+    "partitionData": true
   }
 }
 EOF
