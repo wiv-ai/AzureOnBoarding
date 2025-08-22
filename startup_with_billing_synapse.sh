@@ -721,7 +721,7 @@ GO
 SELECT TOP 10
     r.filepath() as FilePath
 FROM OPENROWSET(
-    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*/*.csv',
+    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*.csv',
     DATA_SOURCE = 'BillingStorage',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
@@ -729,22 +729,21 @@ FROM OPENROWSET(
 ) AS r;
 GO
 
--- Drop existing view
+-- Drop and recreate with correct syntax
 IF OBJECT_ID('BillingData', 'V') IS NOT NULL
     DROP VIEW BillingData;
 GO
 
--- Create view with proper path
--- Update the date range (YYYYMMDD-YYYYMMDD) based on actual files
 CREATE VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
-    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*/*.csv',
+    BULK 'billing-data/DailyBillingExport/*/*/*.csv',
     DATA_SOURCE = 'BillingStorage',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
     HEADER_ROW = TRUE
-) WITH (
+) 
+WITH (
     BilledCost VARCHAR(50),
     BillingAccountId VARCHAR(256),
     BillingAccountName VARCHAR(256),
