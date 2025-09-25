@@ -4,6 +4,122 @@ echo ""
 echo "🚀 Azure Onboarding Script with Billing & Synapse Starting..."
 echo "--------------------------------------"
 
+# ===========================
+# INSTALL REQUIRED TOOLS
+# ===========================
+echo ""
+echo "🔧 Checking and installing required tools..."
+echo "--------------------------------------"
+
+# Function to detect OS
+detect_os() {
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if [ -f /etc/debian_version ]; then
+            echo "debian"
+        elif [ -f /etc/redhat-release ]; then
+            echo "redhat"
+        else
+            echo "linux"
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "macos"
+    else
+        echo "unknown"
+    fi
+}
+
+OS_TYPE=$(detect_os)
+echo "Detected OS: $OS_TYPE"
+
+# Install Azure CLI if not present
+if ! command -v az &> /dev/null; then
+    echo "📦 Installing Azure CLI..."
+    
+    case $OS_TYPE in
+        debian)
+            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+            ;;
+        redhat)
+            sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+            echo -e "[azure-cli]
+name=Azure CLI
+baseurl=https://packages.microsoft.com/yumrepos/azure-cli
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.microsoft.com/keys/microsoft.asc" | sudo tee /etc/yum.repos.d/azure-cli.repo
+            sudo yum install -y azure-cli
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew update && brew install azure-cli
+            else
+                echo "❌ Homebrew not found. Please install Homebrew first"
+                exit 1
+            fi
+            ;;
+        *)
+            echo "⚠️ Please install Azure CLI manually"
+            ;;
+    esac
+else
+    echo "✅ Azure CLI is already installed ($(az version --query '"azure-cli"' -o tsv))"
+fi
+
+# Install Python3 and pip if not present
+if ! command -v python3 &> /dev/null; then
+    echo "📦 Installing Python3..."
+    
+    case $OS_TYPE in
+        debian)
+            sudo apt-get update
+            sudo apt-get install -y python3 python3-pip python3-dev
+            ;;
+        redhat)
+            sudo yum install -y python3 python3-pip python3-devel
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install python3
+            fi
+            ;;
+    esac
+else
+    echo "✅ Python3 is already installed ($(python3 --version))"
+fi
+
+# Install jq for JSON parsing
+if ! command -v jq &> /dev/null; then
+    echo "📦 Installing jq..."
+    case $OS_TYPE in
+        debian)
+            sudo apt-get install -y jq
+            ;;
+        redhat)
+            sudo yum install -y jq
+            ;;
+        macos)
+            if command -v brew &> /dev/null; then
+                brew install jq
+            fi
+            ;;
+    esac
+else
+    echo "✅ jq is already installed"
+fi
+
+echo ""
+echo "✅ All required tools are installed!"
+echo "--------------------------------------"
+
+# Login to Azure
+if ! az account show &> /dev/null; then
+    echo ""
+    echo "🔐 Please login to Azure..."
+    az login
+else
+    echo "✅ Already logged in to Azure as: $(az account show --query user.name -o tsv)"
+fi
+
 # Get current user ID early (we'll need this later)
 CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
 CURRENT_USER_NAME=$(az ad signed-in-user show --query userPrincipalName -o tsv 2>/dev/null)
