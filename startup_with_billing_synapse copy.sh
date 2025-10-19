@@ -728,7 +728,7 @@ WITH (
 GO
 
 -- Test the view
-missing?SELECT TOP 10 * FROM BillingData;
+SELECT TOP 10 * FROM BillingData;
 GO
 EOF
 
