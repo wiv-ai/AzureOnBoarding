@@ -540,24 +540,24 @@ if [ -n "$ACCESS_TOKEN" ]; then
     
     sleep 3
     
-    # Create user for service principal
+    # Create user for service principal (using display name)
     execute_sql "BillingData" \
-        "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER" \
-        "Creating user wiv_account"
+        "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '$APP_DISPLAY_NAME') CREATE USER [$APP_DISPLAY_NAME] FROM EXTERNAL PROVIDER" \
+        "Creating user for service principal $APP_DISPLAY_NAME"
     
     sleep 3
     
     # Grant permissions
     execute_sql "BillingData" \
-        "ALTER ROLE db_datareader ADD MEMBER [wiv_account]" \
+        "ALTER ROLE db_datareader ADD MEMBER [$APP_DISPLAY_NAME]" \
         "Granting db_datareader"
     
     execute_sql "BillingData" \
-        "ALTER ROLE db_datawriter ADD MEMBER [wiv_account]" \
+        "ALTER ROLE db_datawriter ADD MEMBER [$APP_DISPLAY_NAME]" \
         "Granting db_datawriter"
     
     execute_sql "BillingData" \
-        "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]" \
+        "ALTER ROLE db_ddladmin ADD MEMBER [$APP_DISPLAY_NAME]" \
         "Granting db_ddladmin"
     
     sleep 3
@@ -768,14 +768,14 @@ IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStor
 GO
 
 -- Create user for service principal
-IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account')
-    CREATE USER [wiv_account] FROM EXTERNAL PROVIDER;
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '$APP_DISPLAY_NAME')
+    CREATE USER [$APP_DISPLAY_NAME] FROM EXTERNAL PROVIDER;
 GO
 
 -- Grant permissions
-ALTER ROLE db_datareader ADD MEMBER [wiv_account];
-ALTER ROLE db_datawriter ADD MEMBER [wiv_account];
-ALTER ROLE db_ddladmin ADD MEMBER [wiv_account];
+ALTER ROLE db_datareader ADD MEMBER [$APP_DISPLAY_NAME];
+ALTER ROLE db_datawriter ADD MEMBER [$APP_DISPLAY_NAME];
+ALTER ROLE db_ddladmin ADD MEMBER [$APP_DISPLAY_NAME];
 GO
 
 -- Create placeholder view (since no files exist yet)
@@ -820,6 +820,66 @@ EOF
 # ===========================
 # FINAL OUTPUT
 # ===========================
+# ===========================
+# TEST CONNECTION
+# ===========================
+echo ""
+echo "🧪 Testing connection with service principal..."
+echo "--------------------------------------"
+
+# Test connection with the service principal
+TEST_CONNECTION_SQL="
+import pyodbc
+import sys
+
+try:
+    conn_str = (
+        f'DRIVER={{ODBC Driver 18 for SQL Server}};'
+        f'SERVER={SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net;'
+        f'DATABASE=BillingData;'
+        f'UID={APP_ID};'
+        f'PWD={CLIENT_SECRET};'
+        f'Authentication=ActiveDirectoryServicePrincipal;'
+        f'Encrypt=yes;'
+        f'TrustServerCertificate=no;'
+    )
+    
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
+    cursor.execute('SELECT DB_NAME() as DatabaseName, CURRENT_TIMESTAMP as CurrentTime')
+    row = cursor.fetchone()
+    print(f'✅ Connection test successful! Connected to: {row[0]} at {row[1]}')
+    cursor.close()
+    conn.close()
+    
+    # Test BillingData view
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) as RecordCount FROM BillingData')
+    row = cursor.fetchone()
+    print(f'✅ BillingData view accessible! Records: {row[0]}')
+    cursor.close()
+    conn.close()
+    
+except Exception as e:
+    print(f'❌ Connection test failed: {str(e)[:200]}')
+    print('You may need to run the manual setup script in Synapse Studio')
+"
+
+# Write test script
+cat > test_connection.py <<EOF
+$TEST_CONNECTION_SQL
+EOF
+
+# Run the test
+if python3 test_connection.py; then
+    echo "✅ Connection test passed!"
+    CONNECTION_WORKING=true
+else
+    echo "⚠️  Connection test failed - manual setup may be required"
+    CONNECTION_WORKING=false
+fi
+
 echo ""
 echo "============================================================"
 echo "✅ Azure Onboarding Complete"
@@ -845,13 +905,20 @@ echo "   Name:             $CURRENT_USER_NAME"
 echo "   Synapse Role:     Administrator ✅"
 echo ""
 
-if [ "$DATABASE_CREATED" = "true" ]; then
-    echo "✅ Status: DATABASE AND PLACEHOLDER VIEW CREATED"
+if [ "$DATABASE_CREATED" = "true" ] && [ "$CONNECTION_WORKING" = "true" ]; then
+    echo "✅ Status: DATABASE, VIEW, AND CONNECTION ALL WORKING"
     echo ""
     echo "📝 Next Steps:"
     echo "   1. Wait for billing export to create files (5-30 min)"
-    echo "   2. Open Synapse Studio: https://web.azuresynapse.net"
-    echo "   3. Once files exist, run: update_billing_view.sql"
+    echo "   2. Once files exist, run: update_billing_view.sql"
+    echo "   3. Your queries should now work!"
+elif [ "$DATABASE_CREATED" = "true" ]; then
+    echo "⚠️  Status: DATABASE CREATED BUT CONNECTION FAILED"
+    echo ""
+    echo "📝 Troubleshooting:"
+    echo "   1. Check firewall rules in Synapse workspace"
+    echo "   2. Verify service principal has Synapse permissions"
+    echo "   3. Run: synapse_billing_setup.sql manually"
 else
     echo "⚠️  Status: MANUAL SETUP REQUIRED"
     echo ""
