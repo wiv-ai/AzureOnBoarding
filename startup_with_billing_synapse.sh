@@ -473,7 +473,7 @@ sleep 60
 # DATABASE AND VIEW CREATION
 # ===========================
 echo ""
-echo "🔧 Creating BillingAnalytics database..."
+echo "🔧 Creating BillingData database..."
 echo "--------------------------------------"
 
 # Get Azure access token
@@ -513,50 +513,50 @@ if [ -n "$ACCESS_TOKEN" ]; then
     
     # Create database
     execute_sql "master" \
-        "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics') CREATE DATABASE BillingAnalytics" \
-        "Creating database BillingAnalytics"
+        "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingData') CREATE DATABASE BillingData" \
+        "Creating database BillingData"
     
     sleep 5
     
     # Create master key
     MASTER_KEY_PASSWORD="StrongP@ssw0rd$(date +%s | tail -c 4)!"
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$MASTER_KEY_PASSWORD'" \
         "Creating master key"
     
     sleep 3
     
     # Create credential
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity') CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity WITH IDENTITY = 'Managed Identity'" \
         "Creating credential"
     
     sleep 3
     
     # Create external data source
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
         "Creating data source"
     
     sleep 3
     
     # Create user for service principal
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'wiv_account') CREATE USER [wiv_account] FROM EXTERNAL PROVIDER" \
         "Creating user wiv_account"
     
     sleep 3
     
     # Grant permissions
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "ALTER ROLE db_datareader ADD MEMBER [wiv_account]" \
         "Granting db_datareader"
     
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "ALTER ROLE db_datawriter ADD MEMBER [wiv_account]" \
         "Granting db_datawriter"
     
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "ALTER ROLE db_ddladmin ADD MEMBER [wiv_account]" \
         "Granting db_ddladmin"
     
@@ -566,7 +566,7 @@ if [ -n "$ACCESS_TOKEN" ]; then
     echo "  Creating placeholder view (billing files not ready yet)..."
     
     # Drop existing view
-    execute_sql "BillingAnalytics" \
+    execute_sql "BillingData" \
         "IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData" \
         "Dropping existing view"
     
@@ -581,7 +581,7 @@ SELECT
     'Run update_billing_view.sql once files exist' AS NextStep,
     GETDATE() AS CheckedAt"
     
-    if execute_sql "BillingAnalytics" "$PLACEHOLDER_SQL" "Creating placeholder view"; then
+    if execute_sql "BillingData" "$PLACEHOLDER_SQL" "Creating placeholder view"; then
         DATABASE_CREATED=true
         echo "    ✅ Placeholder view created"
     fi
@@ -598,7 +598,7 @@ cat > update_billing_view.sql <<EOF
 -- ========================================================
 -- Run this after billing export creates files
 
-USE BillingAnalytics;
+USE BillingData;
 GO
 
 -- First, check what files exist
@@ -728,7 +728,7 @@ WITH (
 GO
 
 -- Test the view
-missing?SELECT TOP 10 * FROM BillingData;
+SELECT TOP 10 * FROM BillingData;
 GO
 EOF
 
@@ -740,11 +740,11 @@ cat > synapse_billing_setup.sql <<EOF
 -- Run this in Synapse Studio if automated setup failed
 
 -- Create database
-IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingAnalytics')
-    CREATE DATABASE BillingAnalytics;
+IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'BillingData')
+    CREATE DATABASE BillingData;
 GO
 
-USE BillingAnalytics;
+USE BillingData;
 GO
 
 -- Create master key
@@ -793,7 +793,7 @@ SELECT
 GO
 
 -- Set database collation to UTF8
-ALTER DATABASE BillingAnalytics 
+ALTER DATABASE BillingData 
 COLLATE Latin1_General_100_CI_AS_SC_UTF8;
 
 SELECT * FROM BillingData;
@@ -808,7 +808,7 @@ SYNAPSE_CONFIG = {
     'client_id': '$APP_ID',
     'client_secret': '$CLIENT_SECRET',
     'workspace_name': '$SYNAPSE_WORKSPACE',
-    'database_name': 'BillingAnalytics',
+    'database_name': 'BillingData',
     'storage_account': '$STORAGE_ACCOUNT_NAME',
     'container': '$CONTAINER_NAME',
     'export_path': '$EXPORT_PATH',
@@ -838,7 +838,7 @@ echo ""
 echo "🔷 Synapse:"
 echo "   Workspace:        $SYNAPSE_WORKSPACE"
 echo "   Endpoint:         ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
-echo "   Database:         BillingAnalytics"
+echo "   Database:         BillingData"
 echo ""
 echo "👤 Current User:"
 echo "   Name:             $CURRENT_USER_NAME"
