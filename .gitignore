@@ -1,0 +1,43 @@
+# Configuration files with sensitive data
+synapse_config.py
+*_config.py
+*.secret
+*.key
+
+# Environment files
+.env*
+
+# Azure credentials
+azure_credentials.json
+service_principal.json
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.log
