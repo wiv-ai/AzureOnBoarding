@@ -793,10 +793,10 @@ SELECT
 GO
 
 -- Set database collation to UTF8
-ALTER DATABASE BillingData 
+ALTER DATABASE BillingAnalytics 
 COLLATE Latin1_General_100_CI_AS_SC_UTF8;
 
-SELECT * FROM BillingData;
+SELECT * FROM BillingAnalytics;
 GO
 EOF
 
