@@ -598,14 +598,14 @@ cat > update_billing_view.sql <<EOF
 -- ========================================================
 -- Run this after billing export creates files
 
-USE BillingData;
+USE BillingAnalytics;
 GO
 
 -- First, check what files exist
 SELECT TOP 10
     r.filepath() as FilePath
 FROM OPENROWSET(
-    BULK '$EXPORT_PATH/DailyBillingExport/*/*/*.csv',
+    BULK '$EXPORT_PATH/DailyBillingExport-focus-cost/*/*/*.csv',
     DATA_SOURCE = 'BillingStorage',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
@@ -621,7 +621,7 @@ GO
 CREATE VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
-    BULK 'billing-data/DailyBillingExport/*/*/*.csv',
+    BULK 'billing-data/DailyBillingExport-focus-cost/*/*/*.csv',
     DATA_SOURCE = 'BillingStorage',
     FORMAT = 'CSV',
     PARSER_VERSION = '2.0',
