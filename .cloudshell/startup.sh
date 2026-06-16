@@ -35,6 +35,10 @@ if ! az account show >/dev/null 2>&1; then
   az login >/dev/null || { echo "❌ Login failed."; exit 1; }
 fi
 
+CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
+CURRENT_USER_NAME=$(az ad signed-in-user show --query userPrincipalName -o tsv 2>/dev/null)
+[ -n "$CURRENT_USER_NAME" ] && echo "Signed in as: $CURRENT_USER_NAME"
+
 # --- Pick the subscription to host the app registration (NOT a cost scope) ---
 echo ""
 echo "📦 Available Azure subscriptions:"
@@ -250,9 +254,6 @@ if [ "$RUN_SMOKE" = "y" ]; then
   fi
 fi
 
-# =====================================================================
-# OPTIONAL: org-level metrics via MANAGEMENT-GROUP scope (not per-sub)
-# =====================================================================
 assign_role_with_retry() {
   local object_id="$1" role="$2" scope="$3" tries=0 max=8 out
   while true; do
@@ -270,6 +271,931 @@ assign_role_with_retry() {
   done
 }
 
+# Re-pin subscription context (Cloud Shell can drift after billing REST calls / long pauses).
+ensure_app_subscription() {
+  local sub_name state err
+  err=$(az account set --subscription "$APP_SUBSCRIPTION_ID" 2>&1) || {
+    echo "   ❌ Cannot set subscription $APP_SUBSCRIPTION_ID: $err"
+    return 1
+  }
+  sub_name=$(az account show --subscription "$APP_SUBSCRIPTION_ID" --query name -o tsv 2>/dev/null)
+  state=$(az account show --subscription "$APP_SUBSCRIPTION_ID" --query state -o tsv 2>/dev/null)
+  if [ -z "$sub_name" ]; then
+    echo "   ❌ Subscription $APP_SUBSCRIPTION_ID not found for the current login."
+    echo "      Tenant: $(az account show --query tenantId -o tsv 2>/dev/null)"
+    echo "      Run: az login && az account set --subscription $APP_SUBSCRIPTION_ID"
+    return 1
+  fi
+  if [ "$state" != "Enabled" ]; then
+    echo "   ⚠️  Subscription '$sub_name' state is '$state' (expected Enabled)"
+  fi
+  echo "   Subscription context: $sub_name ($APP_SUBSCRIPTION_ID)"
+  return 0
+}
+
+# Microsoft.Storage returns misleading SubscriptionNotFound when the RP is not registered.
+ensure_resource_provider() {
+  local ns="$1" state i
+  state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null)
+  if [ "$state" = "Registered" ]; then
+    return 0
+  fi
+  echo "   Registering $ns (state: ${state:-NotRegistered})..."
+  az provider register --namespace "$ns" --only-show-errors 2>/dev/null || true
+  for i in $(seq 1 36); do
+    state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null)
+    if [ "$state" = "Registered" ]; then
+      echo "   ✅ $ns registered"
+      return 0
+    fi
+    if [ "$i" -le 3 ] || [ $((i % 6)) -eq 0 ]; then
+      echo "   ...waiting for $ns ($i/36, state: ${state:-Registering})"
+    fi
+    sleep 10
+  done
+  echo "   ❌ $ns still not registered (state: ${state:-unknown})"
+  return 1
+}
+
+create_storage_account() {
+  local name="$1" rg="$2" location="$3" hns="$4" out
+  ensure_app_subscription || return 1
+
+  echo "📦 Creating storage account '$name'..."
+  if [ "$hns" = "true" ]; then
+    out=$(az storage account create \
+      --name "$name" \
+      --resource-group "$rg" \
+      --location "$location" \
+      --sku Standard_LRS \
+      --kind StorageV2 \
+      --hierarchical-namespace true \
+      --only-show-errors 2>&1) && { echo "   ✅ Storage account '$name' created"; return 0; }
+  else
+    out=$(az storage account create \
+      --name "$name" \
+      --resource-group "$rg" \
+      --location "$location" \
+      --sku Standard_LRS \
+      --kind StorageV2 \
+      --only-show-errors 2>&1) && { echo "   ✅ Storage account '$name' created"; return 0; }
+  fi
+
+  if echo "$out" | grep -qiE "SubscriptionNotFound|ResourceProviderNotRegistered|not registered"; then
+    echo "   ⚠️  CLI create failed (often unregistered Microsoft.Storage): ${out:0:200}"
+    ensure_resource_provider "Microsoft.Storage" || return 1
+    if [ "$hns" = "true" ]; then
+      out=$(az storage account create \
+        --name "$name" \
+        --resource-group "$rg" \
+        --location "$location" \
+        --sku Standard_LRS \
+        --kind StorageV2 \
+        --hierarchical-namespace true \
+        --only-show-errors 2>&1) && { echo "   ✅ Storage account '$name' created (after RP register)"; return 0; }
+    else
+      out=$(az storage account create \
+        --name "$name" \
+        --resource-group "$rg" \
+        --location "$location" \
+        --sku Standard_LRS \
+        --kind StorageV2 \
+        --only-show-errors 2>&1) && { echo "   ✅ Storage account '$name' created (after RP register)"; return 0; }
+    fi
+  fi
+
+  echo "   Trying REST fallback for '$name'..."
+  local hns_prop="false"
+  [ "$hns" = "true" ] && hns_prop="true"
+  local body
+  body=$(cat <<EOF
+{
+  "sku": {"name": "Standard_LRS"},
+  "kind": "StorageV2",
+  "location": "${location}",
+  "properties": {
+    "isHnsEnabled": ${hns_prop},
+    "accessTier": "Hot"
+  }
+}
+EOF
+)
+  out=$(az rest --method PUT \
+    --uri "https://management.azure.com/subscriptions/${APP_SUBSCRIPTION_ID}/resourceGroups/${rg}/providers/Microsoft.Storage/storageAccounts/${name}?api-version=2023-01-01" \
+    --body "$body" 2>&1) && { echo "   ✅ Storage account '$name' created (REST)"; return 0; }
+
+  echo "   ❌ Could not create storage account '$name': ${out:0:300}"
+  return 1
+}
+
+build_billing_export_body() {
+  cat <<EOF
+{
+  "properties": {
+    "schedule": {
+      "status": "Active",
+      "recurrence": "Daily",
+      "recurrencePeriod": {
+        "from": "${EXPORT_FROM}",
+        "to": "${EXPORT_TO}"
+      }
+    },
+    "format": "Csv",
+    "deliveryInfo": {
+      "destination": {
+        "resourceId": "${STORAGE_RESOURCE_ID}",
+        "container": "${CONTAINER_NAME}",
+        "rootFolderPath": "${ROOT_FOLDER}"
+      }
+    },
+    "definition": {
+      "type": "FocusCost",
+      "timeframe": "MonthToDate",
+      "dataSet": {
+        "granularity": "Daily",
+        "configuration": {
+          "dataVersion": "1.0",
+          "compressionMode": "None",
+          "overwriteMode": true
+        }
+      }
+    },
+    "partitionData": true
+  }
+}
+EOF
+}
+
+# FOCUS exports are subscription-scoped (billing-account scope only supports ActualCost/AmortizedCost).
+COST_EXPORT_API_VERSION="2023-07-01-preview"
+
+# =====================================================================
+# Billing export + Synapse Analytics (FOCUS export at subscription scope)
+# =====================================================================
+SYNAPSE_DEPLOYED="n"
+RESOURCE_GROUP=""
+STORAGE_ACCOUNT_NAME=""
+CONTAINER_NAME=""
+ROOT_FOLDER=""
+EXPORT_NAME=""
+SYNAPSE_WORKSPACE=""
+BILLING_DATABASE="BillingAnalytics"
+
+if [ -n "$BILLING_ACCOUNT_NAME" ]; then
+  echo ""
+  echo "📊 Billing export + Synapse Analytics (automated)"
+  echo "---------------------------------------------------"
+
+  if ! ensure_app_subscription; then
+    echo "   ⚠️  Skipping billing export + Synapse (fix subscription context and re-run)"
+  else
+
+  RESOURCE_GROUP="rg-wiv"
+  CONTAINER_NAME="billing-exports"
+  ROOT_FOLDER="billing-data"
+  EXPORT_NAME="WivFocusDailyExport"
+  UNIQUE_SUFFIX=$(date +%s | tail -c 6)
+
+  if az group show --name "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" >/dev/null 2>&1; then
+    AZURE_REGION=$(az group show --name "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" --query location -o tsv)
+    echo "   Using existing resource group '$RESOURCE_GROUP' in $AZURE_REGION"
+  else
+    read -p "   Azure region for rg-wiv [northeurope]: " AZURE_REGION
+    AZURE_REGION="${AZURE_REGION:-northeurope}"
+    echo "   Creating resource group '$RESOURCE_GROUP' in $AZURE_REGION..."
+    if az group create --name "$RESOURCE_GROUP" --location "$AZURE_REGION" --subscription "$APP_SUBSCRIPTION_ID" --only-show-errors; then
+      echo "   ✅ Resource group ready"
+    else
+      echo "   ❌ Could not create resource group in subscription $APP_SUBSCRIPTION_ID"
+    fi
+  fi
+
+  ensure_app_subscription || true
+
+  echo "🔧 Ensuring required resource providers..."
+  ensure_resource_provider "Microsoft.Storage" || echo "   ⚠️  Microsoft.Storage registration incomplete - storage create may fail"
+  ensure_resource_provider "Microsoft.CostManagementExports" || echo "   ⚠️  Microsoft.CostManagementExports registration incomplete - billing export may fail"
+  ensure_resource_provider "Microsoft.Synapse" || echo "   ⚠️  Microsoft.Synapse registration incomplete - Synapse create may fail"
+  ensure_resource_provider "Microsoft.Sql" || echo "   ⚠️  Microsoft.Sql registration incomplete - Synapse SQL pool requires this"
+
+  STORAGE_ACCOUNT_NAME="wivbill${UNIQUE_SUFFIX}"
+  SYNAPSE_STORAGE="wivsyn${UNIQUE_SUFFIX}"
+  SYNAPSE_WORKSPACE="wiv-synapse-${UNIQUE_SUFFIX}"
+  FILESYSTEM_NAME="synapsefilesystem"
+  SKIP_EXPORT_CREATION="false"
+
+  echo "🔒 Assigning Cost Management Reader (billing account + subscription)..."
+  if [ -n "$BILLING_ACCOUNT_NAME" ]; then
+    az role assignment create \
+      --assignee "$APP_ID" \
+      --role "Cost Management Reader" \
+      --scope "/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}" \
+      --only-show-errors 2>/dev/null || true
+  fi
+  az role assignment create \
+    --assignee "$APP_ID" \
+    --role "Cost Management Reader" \
+    --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
+    --only-show-errors 2>/dev/null || true
+
+  EXPORT_SCOPE_BASE="https://management.azure.com/subscriptions/${APP_SUBSCRIPTION_ID}/providers/Microsoft.CostManagement/exports"
+  EXISTING_EXPORT_CHECK=""
+  for _export_candidate in "$EXPORT_NAME" DailyBillingExport; do
+    _candidate_check=$(az rest --method GET \
+      --uri "${EXPORT_SCOPE_BASE}/${_export_candidate}?api-version=${COST_EXPORT_API_VERSION}" 2>/dev/null || true)
+    if echo "$_candidate_check" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('properties',{}).get('definition',{}).get('type')=='FocusCost' else 1)" 2>/dev/null; then
+      EXISTING_EXPORT_CHECK="$_candidate_check"
+      EXPORT_NAME="$_export_candidate"
+      break
+    fi
+  done
+
+  if [ -n "$EXISTING_EXPORT_CHECK" ]; then
+    echo "   ✅ FOCUS export '$EXPORT_NAME' already exists on subscription - reusing destination storage"
+    SKIP_EXPORT_CREATION="true"
+    STORAGE_RESOURCE_ID=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['resourceId'])")
+    CONTAINER_NAME=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['container'])")
+    ROOT_FOLDER=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['rootFolderPath'])")
+    STORAGE_ACCOUNT_NAME=$(printf '%s' "$STORAGE_RESOURCE_ID" | sed 's|.*/storageAccounts/||; s|/.*||')
+  elif ! az storage account show --name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+    create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "true" || \
+      echo "   ❌ Billing storage account setup failed (need Contributor + Microsoft.Storage registered)"
+  fi
+
+  if [ "$SKIP_EXPORT_CREATION" = "false" ]; then
+    STORAGE_RESOURCE_ID=$(az storage account show \
+      --name "$STORAGE_ACCOUNT_NAME" \
+      --resource-group "$RESOURCE_GROUP" \
+      --query id -o tsv 2>/dev/null)
+
+    if [ -n "$STORAGE_RESOURCE_ID" ]; then
+      echo "📂 Creating container '$CONTAINER_NAME'..."
+      az storage container create \
+        --name "$CONTAINER_NAME" \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --auth-mode login \
+        --only-show-errors >/dev/null 2>&1 || true
+
+      if date --version >/dev/null 2>&1; then
+        EXPORT_FROM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        EXPORT_TO=$(date -u -d "+1 year" +%Y-%m-%dT%H:%M:%SZ)
+      else
+        EXPORT_FROM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        EXPORT_TO=$(date -u -v +1y +%Y-%m-%dT%H:%M:%SZ)
+      fi
+
+      echo "📊 Creating FOCUS billing export '$EXPORT_NAME' (subscription scope)..."
+      create_billing_export() {
+        az rest --method PUT \
+          --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}?api-version=${COST_EXPORT_API_VERSION}" \
+          --body "$EXPORT_BODY" 2>&1
+      }
+
+      EXPORT_BODY=$(build_billing_export_body)
+      EXPORT_RESPONSE=$(create_billing_export) || true
+
+      if echo "$EXPORT_RESPONSE" | grep -qiE "CostManagementExports|RP Not Registered"; then
+        echo "   ⚠️  Microsoft.CostManagementExports not registered on storage subscription - registering..."
+        ensure_resource_provider "Microsoft.CostManagementExports" || true
+        sleep 10
+        EXPORT_RESPONSE=$(create_billing_export) || true
+      fi
+
+      if echo "$EXPORT_RESPONSE" | grep -qiE '"name"|"id"'; then
+        echo "   ✅ FOCUS billing export created on subscription"
+        echo "🔄 Triggering immediate export run..."
+        az rest --method POST \
+          --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}/run?api-version=${COST_EXPORT_API_VERSION}" \
+          --output none 2>/dev/null || echo "   Note: immediate run may not be available yet"
+      elif echo "$EXPORT_RESPONSE" | grep -qiE "RBACAccessDenied|Unauthorized|Interactive authentication|does not have authorization"; then
+        echo "   ❌ Not authorized to create the billing export on this subscription."
+        echo "      The export is created with YOUR logged-in identity, which needs"
+        echo "      'Cost Management Contributor' (or Contributor) on subscription ${APP_SUBSCRIPTION_ID}."
+        echo "      Conditional Access may also require re-auth. Fix with:"
+        echo "        az logout && az login"
+        echo "        az role assignment create --assignee ${CURRENT_USER_ID:-<your-user>} \\"
+        echo "          --role 'Cost Management Contributor' --scope /subscriptions/${APP_SUBSCRIPTION_ID}"
+        echo "      Then re-run this script (it will reuse everything already created)."
+      else
+        echo "   ⚠️  Export create returned: ${EXPORT_RESPONSE:0:300}"
+      fi
+    fi
+  fi
+
+  if [ -z "${STORAGE_RESOURCE_ID:-}" ]; then
+    STORAGE_RESOURCE_ID="/subscriptions/${APP_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_NAME}"
+  fi
+
+  echo ""
+  echo "🔷 Setting up Synapse Analytics workspace..."
+  ensure_app_subscription || true
+  SYNAPSE_REGION=""
+  SYNAPSE_OK="n"
+  SYNAPSE_EXISTS=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" --query name -o tsv 2>/dev/null)
+
+  # Subscriptions cap Synapse workspaces (PAYG default: 2). Offer to reuse an existing one, but let the user choose.
+  if [ -z "$SYNAPSE_EXISTS" ]; then
+    EXISTING_WS_NAMES=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" --query "[].name" -o tsv 2>/dev/null)
+    EXISTING_WS_COUNT=$(printf '%s\n' "$EXISTING_WS_NAMES" | grep -c . 2>/dev/null)
+    if [ "${EXISTING_WS_COUNT:-0}" -gt 0 ]; then
+      echo "   Existing Synapse workspaces in this subscription:"
+      az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
+        --query "[].{Name:name, Region:location, ResourceGroup:resourceGroup}" -o table 2>/dev/null | sed 's/^/     /'
+      echo ""
+      read -p "   Reuse an existing workspace instead of creating a new one? (y/n): " _REUSE_CHOICE
+      if [[ "$_REUSE_CHOICE" =~ ^[Yy]$ ]]; then
+        if [ "${EXISTING_WS_COUNT:-0}" -eq 1 ]; then
+          REUSE_WS=$(printf '%s\n' "$EXISTING_WS_NAMES" | head -n1)
+          echo "   Only one workspace found - reusing '$REUSE_WS'"
+        else
+          read -p "   Workspace name to reuse: " REUSE_WS
+        fi
+        if [ -n "$REUSE_WS" ]; then
+          REUSE_RG=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
+            --query "[?name=='${REUSE_WS}'].resourceGroup | [0]" -o tsv 2>/dev/null)
+          if [ -n "$REUSE_RG" ]; then
+            SYNAPSE_WORKSPACE="$REUSE_WS"
+            RESOURCE_GROUP="$REUSE_RG"
+            SYNAPSE_EXISTS="$REUSE_WS"
+          else
+            echo "   ⚠️  '$REUSE_WS' not found - will create a new workspace instead."
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  if [ -n "$SYNAPSE_EXISTS" ]; then
+    echo "   ✅ Synapse workspace '$SYNAPSE_WORKSPACE' already exists"
+    SYNAPSE_OK="y"
+    SYNAPSE_REGION=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" --query location -o tsv 2>/dev/null)
+    SYNAPSE_STORAGE=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" \
+      --query "defaultDataLakeStorage.accountUrl" -o tsv | sed 's|https://||; s|.dfs.core.windows.net||')
+    FILESYSTEM_NAME=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" \
+      --query "defaultDataLakeStorage.filesystem" -o tsv)
+  else
+    SQL_ADMIN_USER="sqladminuser"
+    SQL_ADMIN_PASSWORD="P@ssw0rd${UNIQUE_SUFFIX}!"
+    SYNAPSE_CREATE_OUT="not-attempted"
+
+    echo "   Synapse must be created in a region that allows SQL provisioning for this subscription."
+    echo "   Suggested SQL-capable regions: westeurope, northeurope, eastus, westus2, swedencentral, uksouth"
+    echo "   (billing storage stays in $AZURE_REGION; Synapse serverless reads it cross-region)"
+
+    while true; do
+      read -p "   Synapse region [$AZURE_REGION] (or 'skip' to skip Synapse): " SYNAPSE_REGION
+      SYNAPSE_REGION="${SYNAPSE_REGION:-$AZURE_REGION}"
+
+      if [ "$SYNAPSE_REGION" = "skip" ]; then
+        echo "   ⏭️  Skipping Synapse workspace creation (per user choice)."
+        SYNAPSE_CREATE_OUT="skipped"
+        break
+      fi
+
+      if ! az account list-locations --query "[?name=='${SYNAPSE_REGION}'].name | [0]" -o tsv 2>/dev/null | grep -q .; then
+        echo "   ⚠️  '$SYNAPSE_REGION' is not a valid Azure region name. Try again (e.g. westeurope)."
+        continue
+      fi
+
+      REGION_TAG=$(printf '%s' "$SYNAPSE_REGION" | tr -cd 'a-z0-9' | cut -c1-6)
+      if [ "$SYNAPSE_REGION" = "$AZURE_REGION" ]; then
+        TRY_SYNAPSE_STORAGE="$SYNAPSE_STORAGE"
+      else
+        TRY_SYNAPSE_STORAGE=$(printf 'wivsyn%s%s' "$UNIQUE_SUFFIX" "$REGION_TAG" | cut -c1-24)
+      fi
+
+      if ! az storage account show --name "$TRY_SYNAPSE_STORAGE" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+        create_storage_account "$TRY_SYNAPSE_STORAGE" "$RESOURCE_GROUP" "$SYNAPSE_REGION" "true" || {
+          echo "   ⚠️  Could not create Synapse storage in $SYNAPSE_REGION. Pick another region."
+          continue
+        }
+      fi
+
+      DATALAKE_RESOURCE_ID=$(az storage account show \
+        --name "$TRY_SYNAPSE_STORAGE" \
+        --resource-group "$RESOURCE_GROUP" \
+        --query id -o tsv 2>/dev/null)
+      [ -z "$DATALAKE_RESOURCE_ID" ] && { echo "   ⚠️  Synapse storage not found after create. Pick another region."; continue; }
+
+      assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Contributor" "$DATALAKE_RESOURCE_ID" || true
+      az storage fs create \
+        --name "$FILESYSTEM_NAME" \
+        --account-name "$TRY_SYNAPSE_STORAGE" \
+        --auth-mode login \
+        --only-show-errors >/dev/null 2>&1 || true
+
+      echo "🏗️  Creating Synapse workspace in $SYNAPSE_REGION (may take 5-10 minutes)..."
+      ensure_app_subscription || true
+      SYNAPSE_CREATE_OUT=$(az synapse workspace create \
+        --name "$SYNAPSE_WORKSPACE" \
+        --resource-group "$RESOURCE_GROUP" \
+        --storage-account "$TRY_SYNAPSE_STORAGE" \
+        --file-system "$FILESYSTEM_NAME" \
+        --sql-admin-login-user "$SQL_ADMIN_USER" \
+        --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
+        --location "$SYNAPSE_REGION" \
+        --only-show-errors 2>&1) && SYNAPSE_CREATE_OUT=""
+
+      if [ -n "$SYNAPSE_CREATE_OUT" ] && echo "$SYNAPSE_CREATE_OUT" | grep -qiE "CustomerSubscriptionNotRegisteredWithSqlRp|Microsoft\.Sql"; then
+        echo "   ⚠️  Microsoft.Sql not registered - registering and retrying in $SYNAPSE_REGION..."
+        ensure_resource_provider "Microsoft.Sql" || true
+        sleep 15
+        SYNAPSE_CREATE_OUT=$(az synapse workspace create \
+          --name "$SYNAPSE_WORKSPACE" \
+          --resource-group "$RESOURCE_GROUP" \
+          --storage-account "$TRY_SYNAPSE_STORAGE" \
+          --file-system "$FILESYSTEM_NAME" \
+          --sql-admin-login-user "$SQL_ADMIN_USER" \
+          --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
+          --location "$SYNAPSE_REGION" \
+          --only-show-errors 2>&1) && SYNAPSE_CREATE_OUT=""
+      fi
+
+      if [ -z "$SYNAPSE_CREATE_OUT" ]; then
+        SYNAPSE_STORAGE="$TRY_SYNAPSE_STORAGE"
+        SYNAPSE_OK="y"
+        echo "   ✅ Synapse workspace created in $SYNAPSE_REGION"
+        break
+      fi
+
+      if echo "$SYNAPSE_CREATE_OUT" | grep -qiE "SqlServerRegionDoesNotAllowProvisioning|not accepting creation"; then
+        echo "   ⚠️  $SYNAPSE_REGION does not allow new SQL servers for this subscription. Choose a different region."
+        continue
+      fi
+
+      if echo "$SYNAPSE_CREATE_OUT" | grep -qiE "ReachedPerSubscriptionWorkspaceLimit|maximum number of Synapse"; then
+        echo "   ⚠️  Subscription Synapse workspace limit reached - attempting to reuse an existing workspace..."
+        REUSE_WS=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
+          --query "[?starts_with(name, 'wiv-synapse-')].name | [0]" -o tsv 2>/dev/null)
+        [ -z "$REUSE_WS" ] && REUSE_WS=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" --query "[0].name" -o tsv 2>/dev/null)
+        if [ -n "$REUSE_WS" ]; then
+          REUSE_RG=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
+            --query "[?name=='${REUSE_WS}'].resourceGroup | [0]" -o tsv 2>/dev/null)
+          SYNAPSE_WORKSPACE="$REUSE_WS"
+          [ -n "$REUSE_RG" ] && RESOURCE_GROUP="$REUSE_RG"
+          SYNAPSE_REGION=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)
+          SYNAPSE_STORAGE=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" \
+            --query "defaultDataLakeStorage.accountUrl" -o tsv | sed 's|https://||; s|.dfs.core.windows.net||')
+          FILESYSTEM_NAME=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" \
+            --query "defaultDataLakeStorage.filesystem" -o tsv)
+          SYNAPSE_CREATE_OUT=""
+          SYNAPSE_OK="y"
+          echo "   ♻️  Reusing existing Synapse workspace '$SYNAPSE_WORKSPACE'"
+        else
+          echo "   ❌ No existing Synapse workspace found to reuse. Delete an unused workspace or request a limit increase."
+        fi
+        break
+      fi
+
+      echo "   ❌ Synapse workspace creation failed in $SYNAPSE_REGION: ${SYNAPSE_CREATE_OUT:0:400}"
+      read -p "   Try a different region? (y/n): " _RETRY_SYNAPSE
+      [[ "$_RETRY_SYNAPSE" =~ ^[Yy]$ ]] && continue
+      break
+    done
+
+    if [ "$SYNAPSE_CREATE_OUT" = "skipped" ]; then
+      echo "   ⏭️  Synapse not created. Re-run later and choose a region to enable analytics."
+    elif [ -n "$SYNAPSE_CREATE_OUT" ] && [ -z "$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --query name -o tsv 2>/dev/null)" ]; then
+      echo "   ❌ Synapse workspace was not created."
+      echo "      Existing workspaces count toward the per-subscription limit (PAYG default: 2)."
+      echo "      Delete an unused one (az synapse workspace delete) or request a limit increase, then re-run."
+    fi
+  fi
+
+  if [ "$SYNAPSE_OK" != "y" ]; then
+    for _i in 1 2 3; do
+      if az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" >/dev/null 2>&1; then
+        SYNAPSE_OK="y"
+        break
+      fi
+      sleep 10
+    done
+  fi
+
+  if [ "$SYNAPSE_OK" = "y" ]; then
+    echo "⏳ Waiting for Synapse workspace to be ready..."
+    az synapse workspace wait --resource-group "$RESOURCE_GROUP" --workspace-name "$SYNAPSE_WORKSPACE" --subscription "$APP_SUBSCRIPTION_ID" --created 2>/dev/null || sleep 30
+
+    echo "🔥 Configuring Synapse firewall..."
+    # 0.0.0.0-0.0.0.0 is the special "Allow Azure services" toggle - it does NOT let
+    # real client IPs (Cloud Shell egress or your browser for Synapse Studio) connect.
+    az synapse workspace firewall-rule create \
+      --name "AllowAllWindowsAzureIps" \
+      --workspace-name "$SYNAPSE_WORKSPACE" \
+      --resource-group "$RESOURCE_GROUP" \
+      --subscription "$APP_SUBSCRIPTION_ID" \
+      --start-ip-address "0.0.0.0" \
+      --end-ip-address "0.0.0.0" \
+      --only-show-errors >/dev/null 2>&1 || true
+    # Allow all client IPs so both this Cloud Shell and Synapse Studio (browser) can
+    # reach the serverless SQL endpoint. Access is still gated by Entra auth + SQL perms.
+    az synapse workspace firewall-rule create \
+      --name "AllowAll" \
+      --workspace-name "$SYNAPSE_WORKSPACE" \
+      --resource-group "$RESOURCE_GROUP" \
+      --subscription "$APP_SUBSCRIPTION_ID" \
+      --start-ip-address "0.0.0.0" \
+      --end-ip-address "255.255.255.255" \
+      --only-show-errors >/dev/null 2>&1 || true
+    # Also pin this client's public IP explicitly (belt and suspenders).
+    CLIENT_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "")
+    if [ -n "$CLIENT_IP" ]; then
+      az synapse workspace firewall-rule create \
+        --name "ClientIP_$(echo "$CLIENT_IP" | tr . _)" \
+        --workspace-name "$SYNAPSE_WORKSPACE" \
+        --resource-group "$RESOURCE_GROUP" \
+        --subscription "$APP_SUBSCRIPTION_ID" \
+        --start-ip-address "$CLIENT_IP" \
+        --end-ip-address "$CLIENT_IP" \
+        --only-show-errors >/dev/null 2>&1 || true
+    fi
+    echo "   ⏳ Waiting ~60s for firewall rules to propagate..."
+    sleep 60
+
+    echo "🔐 Granting Synapse roles..."
+    if [ -n "$CURRENT_USER_ID" ]; then
+      az synapse role assignment create \
+        --workspace-name "$SYNAPSE_WORKSPACE" \
+        --role "Synapse Administrator" \
+        --assignee "$CURRENT_USER_ID" \
+        --only-show-errors >/dev/null 2>&1 || true
+      az synapse role assignment create \
+        --workspace-name "$SYNAPSE_WORKSPACE" \
+        --role "Synapse SQL Administrator" \
+        --assignee "$CURRENT_USER_ID" \
+        --only-show-errors >/dev/null 2>&1 || true
+    fi
+    az synapse role assignment create \
+      --workspace-name "$SYNAPSE_WORKSPACE" \
+      --role "Synapse Administrator" \
+      --assignee "$SP_OBJECT_ID" \
+      --only-show-errors >/dev/null 2>&1 || true
+    az synapse role assignment create \
+      --workspace-name "$SYNAPSE_WORKSPACE" \
+      --role "Synapse SQL Administrator" \
+      --assignee "$SP_OBJECT_ID" \
+      --only-show-errors >/dev/null 2>&1 || true
+
+    SYNAPSE_IDENTITY=$(az synapse workspace show \
+      --name "$SYNAPSE_WORKSPACE" \
+      --resource-group "$RESOURCE_GROUP" \
+      --subscription "$APP_SUBSCRIPTION_ID" \
+      --query "identity.principalId" -o tsv 2>/dev/null)
+
+    echo "🔐 Granting storage access on billing export storage..."
+    if [ -n "$SYNAPSE_IDENTITY" ]; then
+      az role assignment create \
+        --role "Storage Blob Data Reader" \
+        --assignee-object-id "$SYNAPSE_IDENTITY" \
+        --scope "$STORAGE_RESOURCE_ID" \
+        --only-show-errors >/dev/null 2>&1 || true
+    fi
+    assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || true
+    if [ -n "$CURRENT_USER_ID" ]; then
+      az role assignment create \
+        --role "Storage Blob Data Reader" \
+        --assignee "$CURRENT_USER_ID" \
+        --scope "$STORAGE_RESOURCE_ID" \
+        --only-show-errors >/dev/null 2>&1 || true
+    fi
+
+    echo "⏳ Waiting for permissions to propagate..."
+    sleep 45
+
+    echo ""
+    echo "🔧 Creating $BILLING_DATABASE database and FOCUS views..."
+    ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+    DATABASE_CREATED=false
+
+    if [ -n "$ACCESS_TOKEN" ]; then
+      # IMPORTANT: the Synapse serverless SQL pool only speaks the TDS protocol on
+      # ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net:1433. There is NO HTTP REST
+      # "run query" API - posting to /sql/databases/<db>/query always returns HTTP 500.
+      # So we run T-SQL through a real driver (mssql-python, or pyodbc + msodbcsql18),
+      # authenticating as the current Cloud Shell user (granted Synapse/SQL admin above).
+      SQL_SERVER="${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
+
+      echo "  Preparing SQL client (serverless SQL pool needs a TDS driver)..."
+      SQL_DRIVER=""
+      if python3 -c 'import mssql_python' 2>/dev/null; then
+        SQL_DRIVER="mssql_python"
+      elif python3 -m pip install --quiet --user --disable-pip-version-check mssql-python 2>/dev/null && python3 -c 'import mssql_python' 2>/dev/null; then
+        SQL_DRIVER="mssql_python"
+      elif python3 -c 'import pyodbc' 2>/dev/null; then
+        SQL_DRIVER="pyodbc"
+      else
+        echo "    Installing ODBC driver + pyodbc (one-time)..."
+        sudo ACCEPT_EULA=Y tdnf install -y msodbcsql18 >/dev/null 2>&1 || true
+        if python3 -m pip install --quiet --user --disable-pip-version-check pyodbc 2>/dev/null && python3 -c 'import pyodbc' 2>/dev/null; then
+          SQL_DRIVER="pyodbc"
+        fi
+      fi
+      if [ -n "$SQL_DRIVER" ]; then
+        echo "    ✅ SQL client ready ($SQL_DRIVER)"
+      else
+        echo "    ⚠️  Could not install a SQL driver - Synapse SQL setup will be skipped"
+      fi
+
+      # Python helper: runs one T-SQL batch from stdin, retrying while the serverless
+      # pool resumes from cold (it pauses when idle and takes ~30-90s to wake up).
+      SQL_HELPER="$HOME/.wiv_sqlexec.py"
+      cat > "$SQL_HELPER" <<'PYEOF'
+import os, sys, time
+
+server = sys.argv[1]
+database = sys.argv[2]
+query = sys.stdin.read()
+token = os.environ.get("WIV_SQL_TOKEN", "")
+driver = os.environ.get("WIV_SQL_DRIVER", "")
+
+
+def connect_mssql():
+    from mssql_python import connect
+    return connect(
+        f"Server={server};Database={database};"
+        "Authentication=ActiveDirectoryDefault;Encrypt=yes;"
+        "TrustServerCertificate=no;"
+    )
+
+
+def connect_pyodbc():
+    import struct
+    import pyodbc
+    SQL_COPT_SS_ACCESS_TOKEN = 1256
+    exptoken = b"".join(bytes([b, 0]) for b in token.encode("utf-8"))
+    tokenstruct = struct.pack("=i", len(exptoken)) + exptoken
+    return pyodbc.connect(
+        f"Driver={{ODBC Driver 18 for SQL Server}};Server={server};"
+        f"Database={database};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;",
+        attrs_before={SQL_COPT_SS_ACCESS_TOKEN: tokenstruct},
+    )
+
+
+make_conn = connect_mssql if driver == "mssql_python" else connect_pyodbc
+
+last = ""
+for attempt in range(8):
+    try:
+        conn = make_conn()
+        try:
+            conn.setautocommit(True)
+        except Exception:
+            try:
+                conn.autocommit = True
+            except Exception:
+                pass
+        cur = conn.cursor()
+        cur.execute(query)
+        try:
+            cur.fetchall()
+        except Exception:
+            pass
+        cur.close()
+        conn.close()
+        print("OK")
+        sys.exit(0)
+    except Exception as exc:
+        last = str(exc)
+        transient = any(
+            s in last
+            for s in ("40613", "resuming", "is not currently available", "timeout",
+                      "Timeout", "10060", "08001", "HYT00", "Login timeout", "TCP Provider")
+        )
+        if attempt < 7 and transient:
+            time.sleep(10 + attempt * 10)
+            continue
+        break
+sys.stderr.write(last[:400])
+sys.exit(1)
+PYEOF
+
+      # Same signature as before: execute_sql <database> <query> <description>.
+      execute_sql() {
+        local database=$1 query=$2 description=$3 err
+        echo "  $description..."
+        if [ -z "$SQL_DRIVER" ]; then
+          echo "    ⚠️  No SQL driver available - skipped"
+          return 1
+        fi
+        ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
+        if WIV_SQL_TOKEN="$ACCESS_TOKEN" WIV_SQL_DRIVER="$SQL_DRIVER" \
+            python3 "$SQL_HELPER" "$SQL_SERVER" "$database" <<< "$query" >/dev/null 2>/tmp/wiv_sql_err; then
+          echo "    ✅ Success"
+          return 0
+        fi
+        err=$(tr -d '\n' < /tmp/wiv_sql_err 2>/dev/null | cut -c1-200)
+        echo "    ⚠️  Failed: ${err:-unknown error}"
+        return 1
+      }
+
+      # First query resumes the serverless pool; the helper already retries on cold start.
+      if [ -n "$SQL_DRIVER" ]; then
+        echo "  Warming up serverless SQL endpoint (first query resumes the pool)..."
+        if WIV_SQL_TOKEN="$ACCESS_TOKEN" WIV_SQL_DRIVER="$SQL_DRIVER" \
+            python3 "$SQL_HELPER" "$SQL_SERVER" "master" <<< "SELECT 1" >/dev/null 2>&1; then
+          echo "    ✅ Endpoint responsive"
+        else
+          echo "    ⏳ Endpoint still resuming - continuing (each statement retries)"
+        fi
+      fi
+
+      execute_sql "master" \
+        "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '${BILLING_DATABASE}') CREATE DATABASE ${BILLING_DATABASE}" \
+        "Creating database ${BILLING_DATABASE}"
+      sleep 5
+
+      # FOCUS CSVs are UTF-8; without a UTF-8 collation, VARCHAR reads raise conversion warnings.
+      execute_sql "master" \
+        "ALTER DATABASE ${BILLING_DATABASE} COLLATE Latin1_General_100_CI_AS_SC_UTF8" \
+        "Setting UTF-8 database collation"
+      sleep 3
+
+      MASTER_KEY_PASSWORD="StrongP@ssw0rd${UNIQUE_SUFFIX}!"
+      execute_sql "$BILLING_DATABASE" \
+        "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '${MASTER_KEY_PASSWORD}'" \
+        "Creating master key"
+      sleep 3
+
+      execute_sql "$BILLING_DATABASE" \
+        "IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity') CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity WITH IDENTITY = 'Managed Identity'" \
+        "Creating credential"
+      sleep 3
+
+      execute_sql "$BILLING_DATABASE" \
+        "IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
+        "Creating external data source"
+      sleep 3
+
+      execute_sql "$BILLING_DATABASE" \
+        "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '${APP_DISPLAY_NAME}') CREATE USER [${APP_DISPLAY_NAME}] FROM EXTERNAL PROVIDER" \
+        "Creating user for service principal"
+      sleep 2
+
+      execute_sql "$BILLING_DATABASE" "ALTER ROLE db_datareader ADD MEMBER [${APP_DISPLAY_NAME}]" "Granting db_datareader"
+      execute_sql "$BILLING_DATABASE" "ALTER ROLE db_datawriter ADD MEMBER [${APP_DISPLAY_NAME}]" "Granting db_datawriter"
+      execute_sql "$BILLING_DATABASE" "ALTER ROLE db_ddladmin ADD MEMBER [${APP_DISPLAY_NAME}]" "Granting db_ddladmin"
+      sleep 3
+
+      execute_sql "$BILLING_DATABASE" \
+        "IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData" \
+        "Dropping existing BillingData view"
+
+      # Actual layout: <rootFolder>/<exportName>/<daterange>/<runtimestamp>/<guid>/part_*.csv
+      BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.csv"
+      BILLING_VIEW_SQL="CREATE VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK '${BILLING_BULK_PATH}',
+    DATA_SOURCE = 'BillingStorage',
+    FORMAT = 'CSV',
+    PARSER_VERSION = '2.0',
+    HEADER_ROW = TRUE
+)
+WITH (
+    BilledCost VARCHAR(50),
+    BillingAccountId VARCHAR(256),
+    BillingAccountName VARCHAR(256),
+    BillingAccountType VARCHAR(256),
+    BillingCurrency VARCHAR(16),
+    BillingPeriodEnd VARCHAR(50),
+    BillingPeriodStart VARCHAR(50),
+    ChargeCategory VARCHAR(256),
+    ChargeClass VARCHAR(50),
+    ChargeDescription VARCHAR(512),
+    ChargeFrequency VARCHAR(64),
+    ChargePeriodEnd VARCHAR(50),
+    ChargePeriodStart VARCHAR(50),
+    CommitmentDiscountCategory VARCHAR(50),
+    CommitmentDiscountId VARCHAR(256),
+    CommitmentDiscountName VARCHAR(256),
+    CommitmentDiscountStatus VARCHAR(256),
+    CommitmentDiscountType VARCHAR(256),
+    ConsumedQuantity VARCHAR(50),
+    ConsumedUnit VARCHAR(64),
+    ContractedCost VARCHAR(50),
+    ContractedUnitPrice VARCHAR(50),
+    EffectiveCost VARCHAR(50),
+    InvoiceIssuerName VARCHAR(256),
+    ListCost VARCHAR(50),
+    ListUnitPrice VARCHAR(50),
+    PricingCategory VARCHAR(256),
+    PricingQuantity VARCHAR(50),
+    PricingUnit VARCHAR(64),
+    ProviderName VARCHAR(256),
+    PublisherName VARCHAR(256),
+    RegionId VARCHAR(256),
+    RegionName VARCHAR(256),
+    ResourceId VARCHAR(512),
+    ResourceName VARCHAR(512),
+    ResourceType VARCHAR(256),
+    ServiceCategory VARCHAR(256),
+    ServiceName VARCHAR(256),
+    SkuId VARCHAR(256),
+    SkuPriceId VARCHAR(256),
+    SubAccountId VARCHAR(256),
+    SubAccountName VARCHAR(256),
+    SubAccountType VARCHAR(256),
+    Tags VARCHAR(4000),
+    x_AccountId VARCHAR(256),
+    x_AccountName VARCHAR(256),
+    x_AccountOwnerId VARCHAR(256),
+    x_BilledCostInUsd VARCHAR(50),
+    x_BilledUnitPrice VARCHAR(50),
+    x_BillingAccountId VARCHAR(256),
+    x_BillingAccountName VARCHAR(256),
+    x_BillingExchangeRate VARCHAR(50),
+    x_BillingExchangeRateDate VARCHAR(50),
+    x_BillingProfileId VARCHAR(256),
+    x_BillingProfileName VARCHAR(256),
+    x_ContractedCostInUsd VARCHAR(50),
+    x_CostAllocationRuleName VARCHAR(256),
+    x_CostCenter VARCHAR(256),
+    x_CustomerId VARCHAR(256),
+    x_CustomerName VARCHAR(256),
+    x_EffectiveCostInUsd VARCHAR(50),
+    x_EffectiveUnitPrice VARCHAR(50),
+    x_InvoiceId VARCHAR(256),
+    x_InvoiceIssuerId VARCHAR(256),
+    x_InvoiceSectionId VARCHAR(256),
+    x_InvoiceSectionName VARCHAR(256),
+    x_ListCostInUsd VARCHAR(50),
+    x_PartnerCreditApplied VARCHAR(50),
+    x_PartnerCreditRate VARCHAR(50),
+    x_PricingBlockSize VARCHAR(50),
+    x_PricingCurrency VARCHAR(16),
+    x_PricingSubcategory VARCHAR(256),
+    x_PricingUnitDescription VARCHAR(512),
+    x_PublisherCategory VARCHAR(256),
+    x_PublisherId VARCHAR(256),
+    x_ResellerId VARCHAR(256),
+    x_ResellerName VARCHAR(256),
+    x_ResourceGroupName VARCHAR(256),
+    x_ResourceType VARCHAR(256),
+    x_ServicePeriodEnd VARCHAR(50),
+    x_ServicePeriodStart VARCHAR(50),
+    x_SkuDescription VARCHAR(512),
+    x_SkuDetails VARCHAR(1024),
+    x_SkuIsCreditEligible VARCHAR(16),
+    x_SkuMeterCategory VARCHAR(256),
+    x_SkuMeterId VARCHAR(256),
+    x_SkuMeterName VARCHAR(512),
+    x_SkuMeterSubcategory VARCHAR(256),
+    x_SkuOfferId VARCHAR(256),
+    x_SkuOrderId VARCHAR(256),
+    x_SkuOrderName VARCHAR(256),
+    x_SkuPartNumber VARCHAR(256),
+    x_SkuRegion VARCHAR(256),
+    x_SkuServiceFamily VARCHAR(256),
+    x_SkuTerm VARCHAR(256),
+    x_SkuTier VARCHAR(256)
+) AS BillingExport"
+
+      if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL" "Creating FOCUS BillingData view"; then
+        DATABASE_CREATED=true
+      fi
+    else
+      echo "   ⚠️  Could not obtain database access token - Synapse SQL setup skipped"
+    fi
+
+    cat > synapse_config.py <<EOF
+# Auto-generated Synapse configuration for Wiv billing analytics
+SYNAPSE_CONFIG = {
+    'tenant_id': '${TENANT_ID}',
+    'client_id': '${APP_ID}',
+    'client_secret': '${CLIENT_SECRET}',
+    'workspace_name': '${SYNAPSE_WORKSPACE}',
+    'database_name': '${BILLING_DATABASE}',
+    'storage_account': '${STORAGE_ACCOUNT_NAME}',
+    'container': '${CONTAINER_NAME}',
+    'export_path': '${ROOT_FOLDER}',
+    'export_name': '${EXPORT_NAME}',
+    'resource_group': '${RESOURCE_GROUP}',
+    'subscription_id': '${APP_SUBSCRIPTION_ID}',
+    'billing_account_name': '${BILLING_ACCOUNT_NAME}',
+    'export_format': 'FOCUS'
+}
+EOF
+    echo "   ✅ synapse_config.py written"
+
+    if [ "$DATABASE_CREATED" = "true" ]; then
+      SYNAPSE_DEPLOYED="y"
+      echo "   ✅ Synapse SQL setup complete (first export files may take 5-30 min to appear)"
+    else
+      echo "   ⚠️  Synapse workspace created but SQL setup incomplete - re-run or check permissions"
+    fi
+  else
+    echo "   ⚠️  Synapse workspace not available - skipping SQL setup"
+  fi
+
+  fi
+else
+  echo ""
+  echo "⏭️  Skipping billing export + Synapse (no billing account selected)"
+fi
+
+# =====================================================================
+# OPTIONAL: org-level metrics via MANAGEMENT-GROUP scope (not per-sub)
+# =====================================================================
 echo ""
 echo "📈 Metrics (Monitoring Reader) - org-level only"
 echo "   Azure Monitor has no billing-account scope. The org-level (non per-sub)"
@@ -359,6 +1285,31 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "📄 Cost scope:       billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
 fi
 echo "📄 Metrics scope:    $MG_LABEL"
+if [ "$SYNAPSE_DEPLOYED" = "y" ]; then
+  echo ""
+  echo "📊 Billing export + Synapse:"
+  echo "📄 Resource group:   $RESOURCE_GROUP"
+  echo "📄 Storage account:  $STORAGE_ACCOUNT_NAME"
+  echo "📄 Container:        $CONTAINER_NAME"
+  echo "📄 Export name:      $EXPORT_NAME (FOCUS, daily)"
+  echo "📄 Export path:      $ROOT_FOLDER/${EXPORT_NAME}/"
+  echo "📄 Synapse workspace: $SYNAPSE_WORKSPACE"
+  [ -n "$SYNAPSE_REGION" ] && echo "📄 Synapse region:    $SYNAPSE_REGION"
+  echo "📄 Synapse endpoint: ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
+  echo "📄 Database:         $BILLING_DATABASE (view: BillingData)"
+  echo "📄 Config file:      synapse_config.py"
+fi
+if [ -n "$SYNAPSE_WORKSPACE" ] && az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" >/dev/null 2>&1; then
+  export SYNAPSE_WORKSPACE
+  export SYNAPSE_SERVERLESS_ENDPOINT="${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
+  echo ""
+  echo "📄 Synapse workspace name: $SYNAPSE_WORKSPACE"
+  echo "📄 Synapse SQL endpoint:   ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
+  printf 'SYNAPSE_WORKSPACE=%s\nSYNAPSE_SERVERLESS_ENDPOINT=%s-ondemand.sql.azuresynapse.net\n' \
+    "$SYNAPSE_WORKSPACE" "$SYNAPSE_WORKSPACE" > synapse_workspace.env
+  echo "   (also written to synapse_workspace.env and exported to this shell)"
+fi
+
 echo ""
 echo "🔐 CLIENT SECRET (sensitive - store in your secret manager, do not commit):"
 echo "    $CLIENT_SECRET"
