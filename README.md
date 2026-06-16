@@ -244,6 +244,14 @@ python3 test_remote_query.py
 | "Date: illegal option" | macOS date command | Script handles automatically |
 | "Invalid column: CostInUsd" | Case sensitivity | Fixed to "CostInUSD" |
 | "pyodbc installation failed" | Missing dependencies | Script uses fallback methods |
+| All SQL DDL returns `HTTP 500` | The serverless SQL pool only speaks TDS (port 1433); there is **no** `/sql/databases/<db>/query` HTTP API | Script runs SQL through a real driver (`mssql-python`, fallback `pyodbc` + `msodbcsql18`), not curl/REST |
+| `mssql-python`: "Unknown keyword 'connection timeout'" | That keyword is unsupported by the bundled driver | Removed from the `mssql-python` connection string (kept for `pyodbc`) |
+| "Unable to connect to serverless SQL pool because of a network/firewall issue" (Synapse Studio) | The `0.0.0.0-0.0.0.0` rule is only the "Allow Azure services" toggle, not real client IPs | Script adds a real `AllowAll` firewall rule (`0.0.0.0-255.255.255.255`) + ~60s propagation wait |
+| "Referenced external data source 'BillingStorage' not found" / "Invalid object name 'BillingData'" | Query running against `master` instead of `BillingAnalytics` | Select **`BillingAnalytics`** in the database dropdown, or prefix `USE BillingAnalytics; GO` |
+| `0 rows` from `BillingData` (no error) | Export hasn't written CSV files yet | Wait for the first export run (5-30 min) |
+| "Potential conversion error … from UTF8 encoded text" | DB default collation isn't UTF-8 | `ALTER DATABASE BillingAnalytics COLLATE Latin1_General_100_CI_AS_SC_UTF8;` (run from `master` — needs an exclusive lock) |
+| "could not be exclusively locked" on the `ALTER … COLLATE` | A session is connected to `BillingAnalytics` | Switch the database dropdown back to `master`, close other tabs, retry |
+| Wrong wildcard depth in view (`*/*/*.csv`) | Real layout is `<rootFolder>/<exportName>/<daterange>/<runid>/<guid>/part_*.csv` | View path corrected to `${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.csv` |
 
 ### Manual Fallbacks
 
@@ -257,6 +265,39 @@ If automated setup fails:
    ```bash
    ./complete_synapse_setup.sh
    ```
+
+### Backend workflow step (`Azure_Synapse_Billing_Query`, `AZURE-003`)
+
+The Wiv platform queries this Synapse setup from a workflow step handler
+(`core/modules/azure/azure_synapse_client.py`) that connects **as the service
+principal** (`Authentication=ActiveDirectoryServicePrincipal`) to
+`<workspace_name>-ondemand.sql.azuresynapse.net` / `BillingAnalytics`. The
+`workspace_name`, `app_id`, `client_secret`, and `tenant_id` come from the
+tenant's Azure **integration** record.
+
+| Symptom (in CloudWatch logs) | Cause | Solution |
+|------------------------------|-------|----------|
+| `HYT00 Login timeout expired` on **every** warm-up attempt, then `Warm-up exceeded total time budget of 300s` | The SP cannot reach the endpoint at all — almost always a **stale integration cache** pinning an old/unreachable `workspace_name`, or the target workspace has public network access disabled | Clear the cached integration (below), confirm the integration's `workspace_name` matches the live workspace, and ensure the workspace firewall has an `AllowAll` rule |
+| `HYT00` on the **first** attempt only, then succeeds | Serverless pool resuming from cold | Expected; the client retries (10x / 300s budget) |
+| Warm-up loops on "executed but returned no rows" until budget exhausted | `BillingData` view is empty (no export files yet) | Wait for the first export run |
+
+**Integrations are cached** (encrypted) in DynamoDB table
+`<env>-workflow-executions-cache`, keyed by `tenant_id` (PK) + `cache_id`
+(SK = integration id), with a 24h TTL. If the integration is updated (e.g. a new
+Synapse workspace), the step keeps using the **cached** value until it expires.
+
+Clear a single stale integration cache entry to force a fresh fetch:
+
+```bash
+aws dynamodb delete-item \
+  --region us-east-1 \
+  --table-name <env>-workflow-executions-cache \
+  --key '{"tenant_id":{"S":"<TENANT_ID>"},"cache_id":{"S":"<INTEGRATION_ID>"}}'
+```
+
+The next workflow run re-fetches the integration from the provider. The repo also
+exposes `IntegrationsRepository.clear_cache()` / `get_integration(force_refresh=True)`
+for the same effect from code.
 
 ## 📈 Sample Queries
 
