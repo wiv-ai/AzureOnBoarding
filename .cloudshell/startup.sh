@@ -59,8 +59,10 @@ if [ -z "$APP_ID" ]; then
   echo "🔧 Creating new App Registration..."
   APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --query appId -o tsv)
   az ad sp create --id "$APP_ID" >/dev/null
+  SP_IS_NEW="y"
 else
   echo "✅ Service principal exists. App ID: $APP_ID"
+  SP_IS_NEW="n"
 fi
 
 SP_OBJECT_ID=""
@@ -74,15 +76,24 @@ done
 echo "   SP Object ID: $SP_OBJECT_ID"
 
 # --- Client secret ---
+# Only mint a secret for a brand-new SP. Resetting an existing SP's secret would
+# invalidate the secret already stored in the Wiv integration, breaking it.
 echo ""
-echo "🔑 Creating client secret (2y expiry)..."
-if date --version >/dev/null 2>&1; then
-  END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+if [ "$SP_IS_NEW" = "y" ]; then
+  echo "🔑 Creating client secret (2y expiry)..."
+  if date --version >/dev/null 2>&1; then
+    END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+  else
+    END_DATE=$(date -v +2y +"%Y-%m-%d")
+  fi
+  CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
+  [ -z "$CLIENT_SECRET" ] && { echo "❌ Failed to create client secret."; exit 1; }
 else
-  END_DATE=$(date -v +2y +"%Y-%m-%d")
+  echo "🔑 Service principal already exists - keeping its existing client secret (not resetting)."
+  echo "   Reuse the secret you saved during the first onboarding."
+  echo "   If you lost it, re-create one with: az ad app credential reset --id $APP_ID"
+  CLIENT_SECRET=""
 fi
-CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
-[ -z "$CLIENT_SECRET" ] && { echo "❌ Failed to create client secret."; exit 1; }
 
 # =====================================================================
 # PRIMARY: billing-account cost path (org-level, EA/MCA)
@@ -205,6 +216,12 @@ elif [ -n "$AGREEMENT" ]; then
 fi
 
 # --- Smoke test: query cost AS THE SP at billing-account scope ---
+if [ "$RUN_SMOKE" = "y" ] && [ -z "$CLIENT_SECRET" ]; then
+  echo ""
+  echo "ℹ️  Skipping SP smoke test - no new secret was generated for the existing SP."
+  echo "   (The smoke test needs a client secret to acquire an SP token.)"
+  RUN_SMOKE="n"
+fi
 if [ "$RUN_SMOKE" = "y" ]; then
   echo ""
   read -p "↪️  Press Enter to run the smoke test (allow a few min if the grant was just made)... " _
@@ -426,11 +443,13 @@ build_billing_export_body() {
 EOF
 }
 
-# FOCUS exports are subscription-scoped (billing-account scope only supports ActualCost/AmortizedCost).
+# FOCUS export at billing-account scope: one export covers ALL billing profiles /
+# subscriptions in the MCA (MCA billing account supports FocusCost; management-group
+# scope only supports Usage). No fallback to subscription scope.
 COST_EXPORT_API_VERSION="2023-07-01-preview"
 
 # =====================================================================
-# Billing export + Synapse Analytics (FOCUS export at subscription scope)
+# Billing export + Synapse Analytics (FOCUS export at billing-account scope)
 # =====================================================================
 SYNAPSE_DEPLOYED="n"
 RESOURCE_GROUP=""
@@ -498,7 +517,7 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
     --only-show-errors 2>/dev/null || true
 
-  EXPORT_SCOPE_BASE="https://management.azure.com/subscriptions/${APP_SUBSCRIPTION_ID}/providers/Microsoft.CostManagement/exports"
+  EXPORT_SCOPE_BASE="https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}/providers/Microsoft.CostManagement/exports"
   EXISTING_EXPORT_CHECK=""
   for _export_candidate in "$EXPORT_NAME" DailyBillingExport; do
     _candidate_check=$(az rest --method GET \
@@ -511,7 +530,7 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   done
 
   if [ -n "$EXISTING_EXPORT_CHECK" ]; then
-    echo "   ✅ FOCUS export '$EXPORT_NAME' already exists on subscription - reusing destination storage"
+    echo "   ✅ FOCUS export '$EXPORT_NAME' already exists on billing account - reusing destination storage"
     SKIP_EXPORT_CREATION="true"
     STORAGE_RESOURCE_ID=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['resourceId'])")
     CONTAINER_NAME=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['container'])")
@@ -544,7 +563,7 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
         EXPORT_TO=$(date -u -v +1y +%Y-%m-%dT%H:%M:%SZ)
       fi
 
-      echo "📊 Creating FOCUS billing export '$EXPORT_NAME' (subscription scope)..."
+      echo "📊 Creating FOCUS billing export '$EXPORT_NAME' (billing-account scope - all subscriptions)..."
       create_billing_export() {
         az rest --method PUT \
           --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}?api-version=${COST_EXPORT_API_VERSION}" \
@@ -562,19 +581,20 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
       fi
 
       if echo "$EXPORT_RESPONSE" | grep -qiE '"name"|"id"'; then
-        echo "   ✅ FOCUS billing export created on subscription"
+        echo "   ✅ FOCUS billing export created at billing-account scope (covers all subscriptions)"
         echo "🔄 Triggering immediate export run..."
         az rest --method POST \
           --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}/run?api-version=${COST_EXPORT_API_VERSION}" \
           --output none 2>/dev/null || echo "   Note: immediate run may not be available yet"
       elif echo "$EXPORT_RESPONSE" | grep -qiE "RBACAccessDenied|Unauthorized|Interactive authentication|does not have authorization"; then
-        echo "   ❌ Not authorized to create the billing export on this subscription."
-        echo "      The export is created with YOUR logged-in identity, which needs"
-        echo "      'Cost Management Contributor' (or Contributor) on subscription ${APP_SUBSCRIPTION_ID}."
+        echo "   ❌ Not authorized to create the billing export at billing-account scope."
+        echo "      The export is created with YOUR logged-in identity, which needs a billing"
+        echo "      role with export rights on the billing account (e.g. 'Cost Management Contributor'"
+        echo "      via Access control, or a Billing account Owner/Contributor role)."
         echo "      Conditional Access may also require re-auth. Fix with:"
         echo "        az logout && az login"
-        echo "        az role assignment create --assignee ${CURRENT_USER_ID:-<your-user>} \\"
-        echo "          --role 'Cost Management Contributor' --scope /subscriptions/${APP_SUBSCRIPTION_ID}"
+        echo "        # Grant a Cost Management/Billing contributor role on:"
+        echo "        #   /providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}"
         echo "      Then re-run this script (it will reuse everything already created)."
       else
         echo "   ⚠️  Export create returned: ${EXPORT_RESPONSE:0:300}"
@@ -843,12 +863,18 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
       --query "identity.principalId" -o tsv 2>/dev/null)
 
     echo "🔐 Granting storage access on billing export storage..."
+    # On reuse (existing workspace, NEW billing storage) this grant is what makes the
+    # serverless view readable. Use the verified/retried path and confirm it landed,
+    # rather than a silent one-shot, so the first BillingData query doesn't fail later.
     if [ -n "$SYNAPSE_IDENTITY" ]; then
-      az role assignment create \
-        --role "Storage Blob Data Reader" \
-        --assignee-object-id "$SYNAPSE_IDENTITY" \
-        --scope "$STORAGE_RESOURCE_ID" \
-        --only-show-errors >/dev/null 2>&1 || true
+      assign_role_with_retry "$SYNAPSE_IDENTITY" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || \
+        echo "   ⚠️  Could not confirm Storage Blob Data Reader for the Synapse identity."
+      if az role assignment list --assignee "$SYNAPSE_IDENTITY" --scope "$STORAGE_RESOURCE_ID" \
+           --query "[?roleDefinitionName=='Storage Blob Data Reader'] | [0]" -o tsv 2>/dev/null | grep -q .; then
+        echo "   ✅ Synapse identity has Storage Blob Data Reader on $STORAGE_ACCOUNT_NAME"
+      else
+        echo "   ⚠️  Grant not visible yet (will warm up after view creation)."
+      fi
     fi
     assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || true
     if [ -n "$CURRENT_USER_ID" ]; then
@@ -1021,10 +1047,10 @@ PYEOF
         "Creating credential"
       sleep 3
 
-      execute_sql "$BILLING_DATABASE" \
-        "IF NOT EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
-        "Creating external data source"
-      sleep 3
+      # NOTE: the external data source is (re)created AFTER the view is dropped (below),
+      # because it must always point at the CURRENT storage account. On a reused
+      # workspace the BillingAnalytics DB persists, so an IF NOT EXISTS data source
+      # would keep pointing at a previous run's storage -> "cannot be listed".
 
       execute_sql "$BILLING_DATABASE" \
         "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '${APP_DISPLAY_NAME}') CREATE USER [${APP_DISPLAY_NAME}] FROM EXTERNAL PROVIDER" \
@@ -1039,6 +1065,17 @@ PYEOF
       execute_sql "$BILLING_DATABASE" \
         "IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData" \
         "Dropping existing BillingData view"
+
+      # Recreate the data source so it always points at THIS run's storage account.
+      # (Drop requires no dependent views, hence after the view drop above.)
+      execute_sql "$BILLING_DATABASE" \
+        "IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') DROP EXTERNAL DATA SOURCE BillingStorage" \
+        "Dropping existing external data source (point at current storage)"
+      sleep 2
+      execute_sql "$BILLING_DATABASE" \
+        "CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
+        "Creating external data source -> ${STORAGE_ACCOUNT_NAME}"
+      sleep 2
 
       # Actual layout: <rootFolder>/<exportName>/<daterange>/<runtimestamp>/<guid>/part_*.csv
       BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.csv"
@@ -1152,6 +1189,36 @@ WITH (
 
       if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL" "Creating FOCUS BillingData view"; then
         DATABASE_CREATED=true
+      fi
+
+      # Storage data-plane RBAC for the Synapse identity can take several minutes to
+      # propagate to the serverless endpoint. CREATE VIEW does NOT validate data access,
+      # so the first real SELECT (here or from the backend) is what fails. Warm it up and
+      # verify BillingData is actually readable before we finish, so reuse runs don't
+      # leave a view that errors with "cannot be listed" on first query.
+      if [ "$DATABASE_CREATED" = "true" ]; then
+        # A freshly-granted Storage Blob Data Reader is NOT effective immediately on the
+        # serverless endpoint: on-demand SQL caches the earlier "denied" result and keeps
+        # returning "cannot be listed" until that negative-auth cache expires (~10 min).
+        # RBAC + firewall are already correct by here, so we wait out the cache (up to
+        # ~13 min) and verify a real read succeeds before declaring success.
+        echo "  Verifying BillingData is readable (waiting out serverless auth cache, up to ~13 min)..."
+        echo "  (RBAC + firewall are already set; this is just propagation - it is safe to leave running.)"
+        BILLING_READABLE="false"
+        for _vtry in $(seq 1 18); do
+          if execute_sql "$BILLING_DATABASE" "SELECT TOP 1 1 AS ok FROM BillingData" "Validation read (${_vtry}/18)"; then
+            BILLING_READABLE="true"
+            echo "  ✅ BillingData is queryable"
+            break
+          fi
+          sleep 45
+        done
+        if [ "$BILLING_READABLE" != "true" ]; then
+          echo "  ⚠️  BillingData still not readable after ~13 min. Remaining causes:"
+          echo "       - Serverless auth cache not cleared yet (wait a few more min, retry once)"
+          echo "       - First export files have not landed yet (can take 5-30 min)"
+          echo "     Setup is otherwise complete - re-run 'SELECT TOP 10 * FROM BillingData' shortly."
+        fi
       fi
     else
       echo "   ⚠️  Could not obtain database access token - Synapse SQL setup skipped"
@@ -1291,7 +1358,7 @@ if [ "$SYNAPSE_DEPLOYED" = "y" ]; then
   echo "📄 Resource group:   $RESOURCE_GROUP"
   echo "📄 Storage account:  $STORAGE_ACCOUNT_NAME"
   echo "📄 Container:        $CONTAINER_NAME"
-  echo "📄 Export name:      $EXPORT_NAME (FOCUS, daily)"
+  echo "📄 Export name:      $EXPORT_NAME (FOCUS, daily, billing-account scope - all subscriptions)"
   echo "📄 Export path:      $ROOT_FOLDER/${EXPORT_NAME}/"
   echo "📄 Synapse workspace: $SYNAPSE_WORKSPACE"
   [ -n "$SYNAPSE_REGION" ] && echo "📄 Synapse region:    $SYNAPSE_REGION"
@@ -1311,5 +1378,10 @@ if [ -n "$SYNAPSE_WORKSPACE" ] && az synapse workspace show --name "$SYNAPSE_WOR
 fi
 
 echo ""
-echo "🔐 CLIENT SECRET (sensitive - store in your secret manager, do not commit):"
-echo "    $CLIENT_SECRET"
+if [ -n "$CLIENT_SECRET" ]; then
+  echo "🔐 CLIENT SECRET (sensitive - store in your secret manager, do not commit):"
+  echo "    $CLIENT_SECRET"
+else
+  echo "🔐 CLIENT SECRET: not regenerated (existing service principal)."
+  echo "    Reuse the secret saved during the first onboarding."
+fi
