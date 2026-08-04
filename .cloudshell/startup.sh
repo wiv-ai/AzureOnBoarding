@@ -894,8 +894,8 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
         --only-show-errors >/dev/null 2>&1 || true
     fi
 
-    echo "⏳ Waiting for permissions to propagate..."
-    sleep 45
+    echo "⏳ Waiting for Synapse RBAC + firewall to propagate..."
+    sleep 60
 
     echo ""
     echo "🔧 Creating $BILLING_DATABASE database and FOCUS views..."
@@ -969,7 +969,7 @@ def connect_pyodbc():
 make_conn = connect_mssql if driver == "mssql_python" else connect_pyodbc
 
 last = ""
-for attempt in range(8):
+for attempt in range(12):
     try:
         conn = make_conn()
         try:
@@ -993,11 +993,17 @@ for attempt in range(8):
         last = str(exc)
         transient = any(
             s in last
-            for s in ("40613", "resuming", "is not currently available", "timeout",
-                      "Timeout", "10060", "08001", "HYT00", "Login timeout", "TCP Provider")
+            for s in (
+                "40613", "resuming", "is not currently available", "timeout",
+                "Timeout", "10060", "08001", "HYT00", "Login timeout", "TCP Provider",
+                # Synapse serverless CREATE DATABASE races on the shared 'model' DB.
+                "exclusive lock on database 'model'",
+                "Could not obtain exclusive lock",
+                "Retry the operation later",
+            )
         )
-        if attempt < 7 and transient:
-            time.sleep(10 + attempt * 10)
+        if attempt < 11 and transient:
+            time.sleep(15 + attempt * 5)
             continue
         break
 sys.stderr.write(last[:400])
@@ -1023,9 +1029,33 @@ PYEOF
         return 1
       }
 
+      # CREATE DATABASE on Synapse serverless often fails with exclusive lock on 'model'.
+      # Retry until the DB is visible in sys.databases before any BillingAnalytics work.
+      ensure_billing_database() {
+        local _try _exists
+        for _try in $(seq 1 15); do
+          if execute_sql "master" \
+              "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '${BILLING_DATABASE}') CREATE DATABASE [${BILLING_DATABASE}]" \
+              "Creating database ${BILLING_DATABASE} (attempt ${_try}/15)"; then
+            :
+          fi
+          sleep 5
+          if execute_sql "master" \
+              "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = '${BILLING_DATABASE}') RAISERROR('BillingAnalytics not visible yet', 16, 1)" \
+              "Verifying database ${BILLING_DATABASE} exists"; then
+            echo "    ✅ Database ${BILLING_DATABASE} is ready"
+            return 0
+          fi
+          echo "    ⏳ Database not ready yet (common after model-lock contention) - waiting 20s..."
+          sleep 20
+        done
+        return 1
+      }
+
       # First query resumes the serverless pool; the helper already retries on cold start.
       if [ -n "$SQL_DRIVER" ]; then
         echo "  Warming up serverless SQL endpoint (first query resumes the pool)..."
+        ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
         if WIV_SQL_TOKEN="$ACCESS_TOKEN" WIV_SQL_DRIVER="$SQL_DRIVER" \
             python3 "$SQL_HELPER" "$SQL_SERVER" "master" <<< "SELECT 1" >/dev/null 2>&1; then
           echo "    ✅ Endpoint responsive"
@@ -1034,14 +1064,13 @@ PYEOF
         fi
       fi
 
-      execute_sql "master" \
-        "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '${BILLING_DATABASE}') CREATE DATABASE ${BILLING_DATABASE}" \
-        "Creating database ${BILLING_DATABASE}"
-      sleep 5
-
+      if ! ensure_billing_database; then
+        echo "   ❌ Could not create database ${BILLING_DATABASE} (Synapse model lock / permissions)."
+        echo "      Re-run this script in a few minutes - it is idempotent and will resume SQL setup."
+      else
       # FOCUS CSVs are UTF-8; without a UTF-8 collation, VARCHAR reads raise conversion warnings.
       execute_sql "master" \
-        "ALTER DATABASE ${BILLING_DATABASE} COLLATE Latin1_General_100_CI_AS_SC_UTF8" \
+        "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = '${BILLING_DATABASE}') ALTER DATABASE [${BILLING_DATABASE}] COLLATE Latin1_General_100_CI_AS_SC_UTF8" \
         "Setting UTF-8 database collation"
       sleep 3
 
@@ -1229,6 +1258,7 @@ WITH (
           echo "     Setup is otherwise complete - re-run 'SELECT TOP 10 * FROM BillingData' shortly."
         fi
       fi
+      fi  # ensure_billing_database
     else
       echo "   ⚠️  Could not obtain database access token - Synapse SQL setup skipped"
     fi
