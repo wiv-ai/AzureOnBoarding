@@ -1,10 +1,12 @@
 #!/bin/bash
 #
-# Wiv Azure Onboarding - org-level (EA/MCA), no per-subscription loops
-# --------------------------------------------------------------------
-# Cost is pulled at BILLING-ACCOUNT scope, which aggregates every subscription
-# under one EA/MCA account in a single Cost Management query. There is NO
-# per-subscription cost path here by design.
+# Wiv Azure Onboarding - org-level billing account (EA / MCA / CSP partner)
+# ------------------------------------------------------------------------
+# Cost + FOCUS export at BILLING-ACCOUNT scope: one export covers every
+# subscription under the partner/EA/MCA billing account. CSP is supported when
+# the partner login can see that billing account (usually agreementType
+# MicrosoftCustomerAgreement). Customer tenants with no billing account are
+# not supported by this script.
 #
 # Metrics (Monitoring Reader) has no billing-account equivalent, so the only
 # org-level (non per-subscription) way to grant it is at a MANAGEMENT-GROUP
@@ -21,8 +23,8 @@ API_VERSION="2025-03-01"
 BILLING_API_VERSION="2024-04-01"
 
 echo ""
-echo "🚀 Wiv Azure Onboarding (org-level, EA/MCA) Starting..."
-echo "-------------------------------------------------------"
+echo "🚀 Wiv Azure Onboarding (billing-account: EA/MCA/CSP partner) Starting..."
+echo "------------------------------------------------------------------------"
 
 # --- Sanity: tooling ---
 for bin in az curl python3; do
@@ -96,24 +98,29 @@ else
 fi
 
 # =====================================================================
-# PRIMARY: billing-account cost path (org-level, EA/MCA)
+# PRIMARY: billing-account cost path (EA / MCA / CSP partner)
 # =====================================================================
 echo ""
-echo "💰 Billing-account cost setup (single-call aggregation)"
-echo "-------------------------------------------------------"
+echo "💰 Billing-account cost setup (single export for all subscriptions)"
+echo "-------------------------------------------------------------------"
+echo "   Validates a partner/EA/MCA billing account is visible to this login."
+echo "   CSP partners: sign in to the partner tenant that owns the billing account."
 
 BILLING_TABLE=$(az billing account list --query "[].{Name:name, Agreement:agreementType, Display:displayName}" -o table 2>/dev/null)
 if [ -z "$BILLING_TABLE" ]; then
-  echo "❌ No billing accounts visible to the current login. You either lack billing"
-  echo "   read access, or this tenant is MOSP/CSP (no org-level billing scope)."
-  echo "   Cannot proceed with the org-level cost path."
-  BILLING_ACCOUNT_NAME=""
-  AGREEMENT=""
-else
-  echo "$BILLING_TABLE"
-  read -p "Paste the Billing account 'Name' to target for cost: " BILLING_ACCOUNT_NAME
-  AGREEMENT=$(az billing account list --query "[?name=='${BILLING_ACCOUNT_NAME}'].agreementType | [0]" -o tsv 2>/dev/null)
+  echo "❌ No billing accounts visible to the current login."
+  echo "   This script requires a billing account (EA, MCA, or CSP partner MCA)."
+  echo "   If you are a CSP partner, re-run while logged into the partner tenant"
+  echo "   with billing-account read access (not a customer tenant without a BA)."
+  exit 1
 fi
+
+echo "$BILLING_TABLE"
+read -p "Paste the Billing account 'Name' to target for cost: " BILLING_ACCOUNT_NAME
+[ -z "$BILLING_ACCOUNT_NAME" ] && { echo "❌ Billing account Name is required."; exit 1; }
+AGREEMENT=$(az billing account list --query "[?name=='${BILLING_ACCOUNT_NAME}'].agreementType | [0]" -o tsv 2>/dev/null)
+[ -z "$AGREEMENT" ] && { echo "❌ Could not resolve agreementType for '$BILLING_ACCOUNT_NAME'."; exit 1; }
+echo "   ✅ Billing account validated: $BILLING_ACCOUNT_NAME ($AGREEMENT)"
 
 print_ea_instructions() {
   local guid; guid=$(uuidgen 2>/dev/null || python3 -c "import uuid;print(uuid.uuid4())")
@@ -203,7 +210,9 @@ if [ "$AGREEMENT" = "EnterpriseAgreement" ]; then
     echo ""; echo "📋 Automatic grant unavailable - grant it manually:"; print_ea_instructions
   fi
   RUN_SMOKE="y"
-elif [ "$AGREEMENT" = "MicrosoftCustomerAgreement" ]; then
+elif [ "$AGREEMENT" = "MicrosoftCustomerAgreement" ] || [ "$AGREEMENT" = "MicrosoftPartnerAgreement" ]; then
+  # MCA covers direct MCA and most modern CSP partner billing accounts.
+  # MicrosoftPartnerAgreement is accepted the same way when Azure exposes it.
   echo "🔑 Attempting automatic 'Billing account reader' grant to the SP via REST..."
   if grant_billing_role "$BILLING_ACCOUNT_NAME" "$SP_OBJECT_ID" "$TENANT_ID" "Billing account reader"; then
     echo "   (allow a few minutes for propagation before cost rows appear)"
@@ -211,8 +220,11 @@ elif [ "$AGREEMENT" = "MicrosoftCustomerAgreement" ]; then
     echo ""; echo "📋 Automatic grant unavailable - grant it manually:"; print_mca_instructions
   fi
   RUN_SMOKE="y"
-elif [ -n "$AGREEMENT" ]; then
-  echo "⚠️  Agreement type '$AGREEMENT' has no org-level billing scope. Cannot proceed org-level."
+else
+  echo "❌ Agreement type '$AGREEMENT' is not supported for org-level FOCUS export."
+  echo "   Supported: EnterpriseAgreement, MicrosoftCustomerAgreement (incl. CSP partner),"
+  echo "   MicrosoftPartnerAgreement."
+  exit 1
 fi
 
 # --- Smoke test: query cost AS THE SP at billing-account scope ---
@@ -444,8 +456,7 @@ EOF
 }
 
 # FOCUS export at billing-account scope: one export covers ALL billing profiles /
-# subscriptions in the MCA (MCA billing account supports FocusCost; management-group
-# scope only supports Usage). No fallback to subscription scope.
+# subscriptions under the EA/MCA/CSP-partner billing account.
 COST_EXPORT_API_VERSION="2023-07-01-preview"
 
 # =====================================================================
@@ -462,7 +473,7 @@ BILLING_DATABASE="BillingAnalytics"
 
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo ""
-  echo "📊 Billing export + Synapse Analytics (automated)"
+  echo "📊 Billing export + Synapse Analytics (billing-account FOCUS — all subscriptions)"
   echo "---------------------------------------------------"
 
   if ! ensure_app_subscription; then
@@ -503,14 +514,12 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   FILESYSTEM_NAME="synapsefilesystem"
   SKIP_EXPORT_CREATION="false"
 
-  echo "🔒 Assigning Cost Management Reader (billing account + subscription)..."
-  if [ -n "$BILLING_ACCOUNT_NAME" ]; then
-    az role assignment create \
-      --assignee "$APP_ID" \
-      --role "Cost Management Reader" \
-      --scope "/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}" \
-      --only-show-errors 2>/dev/null || true
-  fi
+  echo "🔒 Assigning Cost Management Reader (billing account + host subscription)..."
+  az role assignment create \
+    --assignee "$APP_ID" \
+    --role "Cost Management Reader" \
+    --scope "/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}" \
+    --only-show-errors 2>/dev/null || true
   az role assignment create \
     --assignee "$APP_ID" \
     --role "Cost Management Reader" \
@@ -1239,6 +1248,7 @@ SYNAPSE_CONFIG = {
     'resource_group': '${RESOURCE_GROUP}',
     'subscription_id': '${APP_SUBSCRIPTION_ID}',
     'billing_account_name': '${BILLING_ACCOUNT_NAME}',
+    'agreement_type': '${AGREEMENT}',
     'export_format': 'FOCUS'
 }
 EOF
@@ -1321,16 +1331,21 @@ if [ -n "$MG_ID" ]; then
 fi
 
 # =====================================================================
-# OPTIONAL: Microsoft Graph application permission
+# OPTIONAL: Microsoft Graph application permissions
 # =====================================================================
 echo ""
-read -p "Grant Microsoft Graph Directory.Read.All (application permission)? (y/n): " GRANT_PERMS
+read -p "Grant Microsoft Graph User.Read.All and Group.Read.All (application permissions)? (y/n): " GRANT_PERMS
 if [[ "$GRANT_PERMS" =~ ^[Yy]$ ]]; then
-  echo "📘 Adding Directory.Read.All (Role) and consenting..."
+  echo "📘 Adding User.Read.All and Group.Read.All (Role) and consenting..."
   az ad app permission add \
     --id "$APP_ID" \
     --api 00000003-0000-0000-c000-000000000000 \
-    --api-permissions 7ab1d382-f21e-4acd-a863-ba3e13f7da61=Role \
+    --api-permissions df02196b-4bf8-4d7d-bdef-90cb943ac5d7=Role \
+    --only-show-errors
+  az ad app permission add \
+    --id "$APP_ID" \
+    --api 00000003-0000-0000-c000-000000000000 \
+    --api-permissions 5b567255-7703-4780-8f29-8358bdb85264=Role \
     --only-show-errors
   if az ad app permission admin-consent --id "$APP_ID" 2>/dev/null; then
     echo "✅ Admin consent granted."
@@ -1338,12 +1353,12 @@ if [[ "$GRANT_PERMS" =~ ^[Yy]$ ]]; then
     echo "⚠️  Admin consent failed - grant manually (App registrations > API permissions)."
   fi
 else
-  echo "🚫 Skipping Microsoft Graph permission."
+  echo "🚫 Skipping Microsoft Graph permissions."
 fi
 
 # --- Final output ---
 echo ""
-echo "✅ Onboarding Complete (org-level)"
+echo "✅ Onboarding Complete (billing-account scope)"
 echo "--------------------------------------"
 echo "📄 Tenant ID:        $TENANT_ID"
 echo "📄 App (Client) ID:  $APP_ID"
