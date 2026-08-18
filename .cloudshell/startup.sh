@@ -429,9 +429,12 @@ build_billing_export_body() {
         "to": "${EXPORT_TO}"
       }
     },
-    "format": "Csv",
+    "format": "Parquet",
+    "compressionMode": "Snappy",
+    "dataOverwriteBehavior": "OverwritePreviousReport",
     "deliveryInfo": {
       "destination": {
+        "type": "AzureBlob",
         "resourceId": "${STORAGE_RESOURCE_ID}",
         "container": "${CONTAINER_NAME}",
         "rootFolderPath": "${ROOT_FOLDER}"
@@ -443,9 +446,7 @@ build_billing_export_body() {
       "dataSet": {
         "granularity": "Daily",
         "configuration": {
-          "dataVersion": "1.0",
-          "compressionMode": "None",
-          "overwriteMode": true
+          "dataVersion": "1.0"
         }
       }
     },
@@ -457,7 +458,10 @@ EOF
 
 # FOCUS export at billing-account scope: one export covers ALL billing profiles /
 # subscriptions under the EA/MCA/CSP-partner billing account.
-COST_EXPORT_API_VERSION="2023-07-01-preview"
+# 2025-03-01 is required for dataOverwriteBehavior=OverwritePreviousReport
+# (one RunID per month folder). Nested overwriteMode on the preview API does
+# not delete previous daily run folders.
+COST_EXPORT_API_VERSION="2025-03-01"
 
 # =====================================================================
 # Billing export + Synapse Analytics (FOCUS export at billing-account scope)
@@ -545,6 +549,38 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     CONTAINER_NAME=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['container'])")
     ROOT_FOLDER=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['rootFolderPath'])")
     STORAGE_ACCOUNT_NAME=$(printf '%s' "$STORAGE_RESOURCE_ID" | sed 's|.*/storageAccounts/||; s|/.*||')
+    EXISTING_FORMAT=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('format',''))" 2>/dev/null)
+    EXISTING_COMPRESSION=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "
+import sys, json
+p = json.load(sys.stdin).get('properties', {})
+print((p.get('compressionMode') or p.get('definition', {}).get('dataSet', {}).get('configuration', {}).get('compressionMode', '') or '').lower())
+" 2>/dev/null)
+    EXISTING_OVERWRITE=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "
+import sys, json
+p = json.load(sys.stdin).get('properties', {})
+print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet', {}).get('configuration', {}).get('overwriteMode', '')))
+" 2>/dev/null)
+    if [ "$EXISTING_FORMAT" != "Parquet" ] || [ "$EXISTING_COMPRESSION" != "snappy" ] \
+        || [ "$EXISTING_OVERWRITE" != "OverwritePreviousReport" ]; then
+      echo "   🔄 Updating export '$EXPORT_NAME' to Parquet + Snappy with month overwrite..."
+      EXPORT_FROM=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('schedule',{}).get('recurrencePeriod',{}).get('from',''))" 2>/dev/null)
+      EXPORT_TO=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('schedule',{}).get('recurrencePeriod',{}).get('to',''))" 2>/dev/null)
+      if [ -z "$EXPORT_FROM" ] || [ -z "$EXPORT_TO" ]; then
+        if date --version >/dev/null 2>&1; then
+          EXPORT_FROM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EXPORT_TO=$(date -u -d "+1 year" +%Y-%m-%dT%H:%M:%SZ)
+        else
+          EXPORT_FROM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EXPORT_TO=$(date -u -v +1y +%Y-%m-%dT%H:%M:%SZ)
+        fi
+      fi
+      EXPORT_BODY=$(build_billing_export_body)
+      az rest --method PUT \
+        --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}?api-version=${COST_EXPORT_API_VERSION}" \
+        --body "$EXPORT_BODY" --output none 2>/dev/null \
+        && echo "   ✅ Export updated to Parquet + Snappy with month overwrite" \
+        || echo "   ⚠️  Could not update existing export format - it may still be CSV until recreated"
+    fi
   elif ! az storage account show --name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
     create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "true" || \
       echo "   ❌ Billing storage account setup failed (need Contributor + Microsoft.Storage registered)"
@@ -572,7 +608,7 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
         EXPORT_TO=$(date -u -v +1y +%Y-%m-%dT%H:%M:%SZ)
       fi
 
-      echo "📊 Creating FOCUS billing export '$EXPORT_NAME' (billing-account scope - all subscriptions)..."
+      echo "📊 Creating FOCUS billing export '$EXPORT_NAME' (Parquet/Snappy, billing-account scope - all subscriptions)..."
       create_billing_export() {
         az rest --method PUT \
           --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}?api-version=${COST_EXPORT_API_VERSION}" \
@@ -1068,7 +1104,7 @@ PYEOF
         echo "   ❌ Could not create database ${BILLING_DATABASE} (Synapse model lock / permissions)."
         echo "      Re-run this script in a few minutes - it is idempotent and will resume SQL setup."
       else
-      # FOCUS CSVs are UTF-8; without a UTF-8 collation, VARCHAR reads raise conversion warnings.
+      # FOCUS Parquet strings are UTF-8; without a UTF-8 collation, VARCHAR reads raise conversion warnings.
       execute_sql "master" \
         "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = '${BILLING_DATABASE}') ALTER DATABASE [${BILLING_DATABASE}] COLLATE Latin1_General_100_CI_AS_SC_UTF8" \
         "Setting UTF-8 database collation"
@@ -1115,16 +1151,19 @@ PYEOF
         "Creating external data source -> ${STORAGE_ACCOUNT_NAME}"
       sleep 2
 
-      # Actual layout: <rootFolder>/<exportName>/<daterange>/<runtimestamp>/<guid>/part_*.csv
-      BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.csv"
+      # Layout: <rootFolder>/<exportName>/<daterange>/<runtimestamp>/<guid>/part_*.parquet
+      # Wildcards: filepath(1)=daterange, filepath(2)=runtimestamp, filepath(3)=guid.
+      # MonthToDate exports are cumulative, and each daily run creates a new
+      # <runtimestamp> folder. OverwritePreviousReport keeps one RunID going forward,
+      # but leftover folders still exist — so the view keeps every month folder and
+      # only the latest run inside each (not a union of all ~30 August snapshots).
+      BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.parquet"
       BILLING_VIEW_SQL="CREATE VIEW BillingData AS
-SELECT *
+SELECT BillingExport.*
 FROM OPENROWSET(
     BULK '${BILLING_BULK_PATH}',
     DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'CSV',
-    PARSER_VERSION = '2.0',
-    HEADER_ROW = TRUE
+    FORMAT = 'PARQUET'
 )
 WITH (
     BilledCost VARCHAR(50),
@@ -1223,7 +1262,20 @@ WITH (
     x_SkuServiceFamily VARCHAR(256),
     x_SkuTerm VARCHAR(256),
     x_SkuTier VARCHAR(256)
-) AS BillingExport"
+) AS BillingExport
+INNER JOIN (
+    SELECT
+        r.filepath(1) AS DateRange,
+        MAX(r.filepath(2)) AS LatestRun
+    FROM OPENROWSET(
+        BULK '${BILLING_BULK_PATH}',
+        DATA_SOURCE = 'BillingStorage',
+        FORMAT = 'PARQUET'
+    ) AS r
+    GROUP BY r.filepath(1)
+) AS latest
+    ON BillingExport.filepath(1) = latest.DateRange
+   AND BillingExport.filepath(2) = latest.LatestRun"
 
       if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL" "Creating FOCUS BillingData view"; then
         DATABASE_CREATED=true
@@ -1403,7 +1455,7 @@ if [ "$SYNAPSE_DEPLOYED" = "y" ]; then
   echo "📄 Resource group:   $RESOURCE_GROUP"
   echo "📄 Storage account:  $STORAGE_ACCOUNT_NAME"
   echo "📄 Container:        $CONTAINER_NAME"
-  echo "📄 Export name:      $EXPORT_NAME (FOCUS, daily, billing-account scope - all subscriptions)"
+  echo "📄 Export name:      $EXPORT_NAME (FOCUS, Parquet/Snappy, daily, billing-account scope - all subscriptions)"
   echo "📄 Export path:      $ROOT_FOLDER/${EXPORT_NAME}/"
   echo "📄 Synapse workspace: $SYNAPSE_WORKSPACE"
   [ -n "$SYNAPSE_REGION" ] && echo "📄 Synapse region:    $SYNAPSE_REGION"
