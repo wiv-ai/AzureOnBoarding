@@ -1,0 +1,30 @@
+.cloudshell/startup.sh
+  s_6384a93d6eb6a3::t_852ac8a9bf7ffb 433-434,437,461-464
+  s_6384a93d6eb6a3::t_31128c76538fed 1458
+  s_6384a93d6eb6a3::t_0d3add9171156a 552-555,557,566-580,582-583
+  s_6384a93d6eb6a3::t_3ebc0292763e9d 581
+  s_6384a93d6eb6a3::t_8b0e1e2fcdbd9e 556,558-565
+  s_6384a93d6eb6a3::t_af23fe25de5383 432
+  s_6384a93d6eb6a3::t_70d92ae89cebc3 1107
+  s_6384a93d6eb6a3::t_5caa6dc3172c00 611
+  s_6384a93d6eb6a3::t_de76bd74cfad45 1160,1166
+  s_6384a93d6eb6a3::t_3a2dc12ebedd8f 449
+  s_6384a93d6eb6a3::t_212b7bcdd5bf91 1154-1159,1162
+  s_6384a93d6eb6a3::t_b7f9e9279f2e6e 1265-1278
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "2c86d1c389c4d76d2f2f368abdfcfb193de300e9",
+  "prompts": {},
+  "sessions": {
+    "s_6384a93d6eb6a3": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d3b862ae-b498-4ce0-8be5-1f4cccf97e2f",
+        "model": "auto-smart"
+      },
+      "human_author": "Dotan Cohen <dotan@wiv.ai>"
+    }
+  }
+}
