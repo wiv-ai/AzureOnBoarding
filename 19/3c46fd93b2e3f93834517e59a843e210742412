@@ -1,0 +1,21 @@
+.cloudshell/startup.sh
+  s_6384a93d6eb6a3::t_4aeaef730b5e95 1156-1161,1163-1171,1177-1178,1185,1187-1199,1201-1205
+  s_6384a93d6eb6a3::t_8e9ef34a7302ff 1200
+  s_6384a93d6eb6a3::t_91d9c6d7c516de 1063
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "193c46fd93b2e3f93834517e59a843e210742412",
+  "prompts": {},
+  "sessions": {
+    "s_6384a93d6eb6a3": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d3b862ae-b498-4ce0-8be5-1f4cccf97e2f",
+        "model": "grok-4.6"
+      },
+      "human_author": "Dotan Cohen <dotan@wiv.ai>"
+    }
+  }
+}
