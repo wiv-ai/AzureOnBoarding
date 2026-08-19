@@ -1151,58 +1151,118 @@ PYEOF
         "Creating external data source -> ${STORAGE_ACCOUNT_NAME}"
       sleep 2
 
-      # Layout: <rootFolder>/<exportName>/<daterange>/<runtimestamp>/<guid>/part_*.parquet
-      # Wildcards: filepath(1)=daterange, filepath(2)=runtimestamp, filepath(3)=guid.
-      # Parquet schema is inferred from file metadata (no OPENROWSET WITH clause),
-      # so CREATE VIEW can fail until the first export is listable. Always create a
-      # simple view first so DROP VIEW cannot leave BillingData missing; then ALTER
-      # in the latest-run filter. MonthToDate exports are cumulative and leftover
-      # daily RunID folders remain even with OverwritePreviousReport — the filter
-      # keeps every month folder and only the latest run inside each.
-      BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.parquet"
-      BILLING_VIEW_SQL_SIMPLE="CREATE OR ALTER VIEW BillingData AS
+      # OverwritePreviousReport FOCUS parquet:
+      # <root>/<export>/<daterange>/<guid>/part_*.snappy.parquet
+      # WITH is required so CREATE VIEW succeeds before the first file lands.
+      BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*.parquet"
+      BILLING_VIEW_SQL="CREATE OR ALTER VIEW BillingData AS
 SELECT *
 FROM OPENROWSET(
     BULK '${BILLING_BULK_PATH}',
     DATA_SOURCE = 'BillingStorage',
     FORMAT = 'PARQUET'
+)
+WITH (
+    BilledCost VARCHAR(50),
+    BillingAccountId VARCHAR(256),
+    BillingAccountName VARCHAR(256),
+    BillingAccountType VARCHAR(256),
+    BillingCurrency VARCHAR(16),
+    BillingPeriodEnd VARCHAR(50),
+    BillingPeriodStart VARCHAR(50),
+    ChargeCategory VARCHAR(256),
+    ChargeClass VARCHAR(50),
+    ChargeDescription VARCHAR(512),
+    ChargeFrequency VARCHAR(64),
+    ChargePeriodEnd VARCHAR(50),
+    ChargePeriodStart VARCHAR(50),
+    CommitmentDiscountCategory VARCHAR(50),
+    CommitmentDiscountId VARCHAR(256),
+    CommitmentDiscountName VARCHAR(256),
+    CommitmentDiscountStatus VARCHAR(256),
+    CommitmentDiscountType VARCHAR(256),
+    ConsumedQuantity VARCHAR(50),
+    ConsumedUnit VARCHAR(64),
+    ContractedCost VARCHAR(50),
+    ContractedUnitPrice VARCHAR(50),
+    EffectiveCost VARCHAR(50),
+    InvoiceIssuerName VARCHAR(256),
+    ListCost VARCHAR(50),
+    ListUnitPrice VARCHAR(50),
+    PricingCategory VARCHAR(256),
+    PricingQuantity VARCHAR(50),
+    PricingUnit VARCHAR(64),
+    ProviderName VARCHAR(256),
+    PublisherName VARCHAR(256),
+    RegionId VARCHAR(256),
+    RegionName VARCHAR(256),
+    ResourceId VARCHAR(512),
+    ResourceName VARCHAR(512),
+    ResourceType VARCHAR(256),
+    ServiceCategory VARCHAR(256),
+    ServiceName VARCHAR(256),
+    SkuId VARCHAR(256),
+    SkuPriceId VARCHAR(256),
+    SubAccountId VARCHAR(256),
+    SubAccountName VARCHAR(256),
+    SubAccountType VARCHAR(256),
+    Tags VARCHAR(4000),
+    x_AccountId VARCHAR(256),
+    x_AccountName VARCHAR(256),
+    x_AccountOwnerId VARCHAR(256),
+    x_BilledCostInUsd VARCHAR(50),
+    x_BilledUnitPrice VARCHAR(50),
+    x_BillingAccountId VARCHAR(256),
+    x_BillingAccountName VARCHAR(256),
+    x_BillingExchangeRate VARCHAR(50),
+    x_BillingExchangeRateDate VARCHAR(50),
+    x_BillingProfileId VARCHAR(256),
+    x_BillingProfileName VARCHAR(256),
+    x_ContractedCostInUsd VARCHAR(50),
+    x_CostAllocationRuleName VARCHAR(256),
+    x_CostCenter VARCHAR(256),
+    x_CustomerId VARCHAR(256),
+    x_CustomerName VARCHAR(256),
+    x_EffectiveCostInUsd VARCHAR(50),
+    x_EffectiveUnitPrice VARCHAR(50),
+    x_InvoiceId VARCHAR(256),
+    x_InvoiceIssuerId VARCHAR(256),
+    x_InvoiceSectionId VARCHAR(256),
+    x_InvoiceSectionName VARCHAR(256),
+    x_ListCostInUsd VARCHAR(50),
+    x_PartnerCreditApplied VARCHAR(50),
+    x_PartnerCreditRate VARCHAR(50),
+    x_PricingBlockSize VARCHAR(50),
+    x_PricingCurrency VARCHAR(16),
+    x_PricingSubcategory VARCHAR(256),
+    x_PricingUnitDescription VARCHAR(512),
+    x_PublisherCategory VARCHAR(256),
+    x_PublisherId VARCHAR(256),
+    x_ResellerId VARCHAR(256),
+    x_ResellerName VARCHAR(256),
+    x_ResourceGroupName VARCHAR(256),
+    x_ResourceType VARCHAR(256),
+    x_ServicePeriodEnd VARCHAR(50),
+    x_ServicePeriodStart VARCHAR(50),
+    x_SkuDescription VARCHAR(512),
+    x_SkuDetails VARCHAR(1024),
+    x_SkuIsCreditEligible VARCHAR(16),
+    x_SkuMeterCategory VARCHAR(256),
+    x_SkuMeterId VARCHAR(256),
+    x_SkuMeterName VARCHAR(512),
+    x_SkuMeterSubcategory VARCHAR(256),
+    x_SkuOfferId VARCHAR(256),
+    x_SkuOrderId VARCHAR(256),
+    x_SkuOrderName VARCHAR(256),
+    x_SkuPartNumber VARCHAR(256),
+    x_SkuRegion VARCHAR(256),
+    x_SkuServiceFamily VARCHAR(256),
+    x_SkuTerm VARCHAR(256),
+    x_SkuTier VARCHAR(256)
 ) AS BillingExport"
-      BILLING_VIEW_SQL_LATEST="CREATE OR ALTER VIEW BillingData AS
-SELECT *
-FROM OPENROWSET(
-    BULK '${BILLING_BULK_PATH}',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'PARQUET'
-) AS BillingExport
-WHERE BillingExport.filepath(2) IN (
-    SELECT MAX(r.filepath(2))
-    FROM OPENROWSET(
-        BULK '${BILLING_BULK_PATH}',
-        DATA_SOURCE = 'BillingStorage',
-        FORMAT = 'PARQUET'
-    ) AS r
-    GROUP BY r.filepath(1)
-)"
 
-      echo "  Creating FOCUS BillingData view (retries until Parquet files are listable, up to ~13 min)..."
-      for _vtry in $(seq 1 18); do
-        if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL_SIMPLE" "Creating BillingData view (${_vtry}/18)"; then
-          DATABASE_CREATED=true
-          break
-        fi
-        sleep 45
-      done
-
-      if [ "$DATABASE_CREATED" = "true" ]; then
-        if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL_LATEST" "Restricting BillingData to latest run per month"; then
-          echo "    ✅ Latest-run filter applied"
-        else
-          echo "    ⚠️  Latest-run filter not applied (filepath filter was rejected)."
-          echo "       BillingData exists and is readable, but leftover daily MTD folders are included."
-        fi
-      else
-        echo "   ❌ Could not create BillingData (no Parquet files listable yet, or OPENROWSET rejected)."
-        echo "      Re-run this script after the first FOCUS export lands — it is idempotent."
+      if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL" "Creating FOCUS BillingData view"; then
+        DATABASE_CREATED=true
       fi
 
       # Storage data-plane RBAC for the Synapse identity can take several minutes to
