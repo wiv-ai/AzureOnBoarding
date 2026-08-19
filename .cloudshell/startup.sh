@@ -1060,7 +1060,7 @@ PYEOF
           echo "    ✅ Success"
           return 0
         fi
-        err=$(tr -d '\n' < /tmp/wiv_sql_err 2>/dev/null | cut -c1-200)
+        err=$(tr -d '\n' < /tmp/wiv_sql_err 2>/dev/null | cut -c1-500)
         echo "    ⚠️  Failed: ${err:-unknown error}"
         return 1
       }
@@ -1153,35 +1153,56 @@ PYEOF
 
       # Layout: <rootFolder>/<exportName>/<daterange>/<runtimestamp>/<guid>/part_*.parquet
       # Wildcards: filepath(1)=daterange, filepath(2)=runtimestamp, filepath(3)=guid.
-      # MonthToDate exports are cumulative, and each daily run creates a new
-      # <runtimestamp> folder. OverwritePreviousReport keeps one RunID going forward,
-      # but leftover folders still exist — so the view keeps every month folder and
-      # only the latest run inside each (not a union of all ~30 August snapshots).
-      # Parquet schema is inferred from file metadata — no OPENROWSET WITH clause.
+      # Parquet schema is inferred from file metadata (no OPENROWSET WITH clause),
+      # so CREATE VIEW can fail until the first export is listable. Always create a
+      # simple view first so DROP VIEW cannot leave BillingData missing; then ALTER
+      # in the latest-run filter. MonthToDate exports are cumulative and leftover
+      # daily RunID folders remain even with OverwritePreviousReport — the filter
+      # keeps every month folder and only the latest run inside each.
       BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*/*.parquet"
-      BILLING_VIEW_SQL="CREATE VIEW BillingData AS
-SELECT BillingExport.*
+      BILLING_VIEW_SQL_SIMPLE="CREATE OR ALTER VIEW BillingData AS
+SELECT *
+FROM OPENROWSET(
+    BULK '${BILLING_BULK_PATH}',
+    DATA_SOURCE = 'BillingStorage',
+    FORMAT = 'PARQUET'
+) AS BillingExport"
+      BILLING_VIEW_SQL_LATEST="CREATE OR ALTER VIEW BillingData AS
+SELECT *
 FROM OPENROWSET(
     BULK '${BILLING_BULK_PATH}',
     DATA_SOURCE = 'BillingStorage',
     FORMAT = 'PARQUET'
 ) AS BillingExport
-INNER JOIN (
-    SELECT
-        r.filepath(1) AS DateRange,
-        MAX(r.filepath(2)) AS LatestRun
+WHERE BillingExport.filepath(2) IN (
+    SELECT MAX(r.filepath(2))
     FROM OPENROWSET(
         BULK '${BILLING_BULK_PATH}',
         DATA_SOURCE = 'BillingStorage',
         FORMAT = 'PARQUET'
     ) AS r
     GROUP BY r.filepath(1)
-) AS latest
-    ON BillingExport.filepath(1) = latest.DateRange
-   AND BillingExport.filepath(2) = latest.LatestRun"
+)"
 
-      if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL" "Creating FOCUS BillingData view"; then
-        DATABASE_CREATED=true
+      echo "  Creating FOCUS BillingData view (retries until Parquet files are listable, up to ~13 min)..."
+      for _vtry in $(seq 1 18); do
+        if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL_SIMPLE" "Creating BillingData view (${_vtry}/18)"; then
+          DATABASE_CREATED=true
+          break
+        fi
+        sleep 45
+      done
+
+      if [ "$DATABASE_CREATED" = "true" ]; then
+        if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL_LATEST" "Restricting BillingData to latest run per month"; then
+          echo "    ✅ Latest-run filter applied"
+        else
+          echo "    ⚠️  Latest-run filter not applied (filepath filter was rejected)."
+          echo "       BillingData exists and is readable, but leftover daily MTD folders are included."
+        fi
+      else
+        echo "   ❌ Could not create BillingData (no Parquet files listable yet, or OPENROWSET rejected)."
+        echo "      Re-run this script after the first FOCUS export lands — it is idempotent."
       fi
 
       # Storage data-plane RBAC for the Synapse identity can take several minutes to
