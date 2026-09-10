@@ -542,13 +542,45 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     fi
   done
 
+  resolve_storage_resource_id() {
+    local id="$1" name="$2" found=""
+    if [ -n "$id" ]; then
+      found=$(az storage account show --ids "$id" --query id -o tsv 2>/dev/null || true)
+      if [ -n "$found" ]; then
+        STORAGE_RESOURCE_ID="$found"
+        STORAGE_ACCOUNT_NAME=$(printf '%s' "$found" | sed 's|.*/storageAccounts/||; s|/.*||')
+        return 0
+      fi
+    fi
+    if [ -n "$name" ]; then
+      found=$(az storage account list --query "[?name=='${name}'].id | [0]" -o tsv 2>/dev/null || true)
+      if [ -n "$found" ]; then
+        STORAGE_RESOURCE_ID="$found"
+        STORAGE_ACCOUNT_NAME="$name"
+        return 0
+      fi
+    fi
+    return 1
+  }
+
   if [ -n "$EXISTING_EXPORT_CHECK" ]; then
-    echo "   ✅ FOCUS export '$EXPORT_NAME' already exists on billing account - reusing destination storage"
+    echo "   ✅ FOCUS export '$EXPORT_NAME' already exists on billing account - checking destination storage"
     SKIP_EXPORT_CREATION="true"
     STORAGE_RESOURCE_ID=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['resourceId'])")
     CONTAINER_NAME=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['container'])")
     ROOT_FOLDER=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['deliveryInfo']['destination']['rootFolderPath'])")
     STORAGE_ACCOUNT_NAME=$(printf '%s' "$STORAGE_RESOURCE_ID" | sed 's|.*/storageAccounts/||; s|/.*||')
+    if ! resolve_storage_resource_id "$STORAGE_RESOURCE_ID" "$STORAGE_ACCOUNT_NAME"; then
+      echo "   ⚠️  Export destination storage '$STORAGE_ACCOUNT_NAME' was not found (deleted or in another tenant)."
+      echo "       Creating a new billing storage account and retargeting the export."
+      STORAGE_ACCOUNT_NAME="wivbill${UNIQUE_SUFFIX}"
+      STORAGE_RESOURCE_ID=""
+      SKIP_EXPORT_CREATION="false"
+      create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "true" || \
+        echo "   ❌ Billing storage account setup failed (need Contributor + Microsoft.Storage registered)"
+    else
+      echo "   ✅ Reusing billing storage '$STORAGE_ACCOUNT_NAME'"
+    fi
     EXISTING_FORMAT=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('format',''))" 2>/dev/null)
     EXISTING_COMPRESSION=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "
 import sys, json
@@ -560,8 +592,9 @@ import sys, json
 p = json.load(sys.stdin).get('properties', {})
 print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet', {}).get('configuration', {}).get('overwriteMode', '')))
 " 2>/dev/null)
-    if [ "$EXISTING_FORMAT" != "Parquet" ] || [ "$EXISTING_COMPRESSION" != "snappy" ] \
-        || [ "$EXISTING_OVERWRITE" != "OverwritePreviousReport" ]; then
+    if [ "$SKIP_EXPORT_CREATION" = "true" ] && { [ "$EXISTING_FORMAT" != "Parquet" ] \
+        || [ "$EXISTING_COMPRESSION" != "snappy" ] \
+        || [ "$EXISTING_OVERWRITE" != "OverwritePreviousReport" ]; }; then
       echo "   🔄 Updating export '$EXPORT_NAME' to Parquet + Snappy with month overwrite..."
       EXPORT_FROM=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('schedule',{}).get('recurrencePeriod',{}).get('from',''))" 2>/dev/null)
       EXPORT_TO=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('schedule',{}).get('recurrencePeriod',{}).get('to',''))" 2>/dev/null)
@@ -911,6 +944,10 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
     # On reuse (existing workspace, NEW billing storage) this grant is what makes the
     # serverless view readable. Use the verified/retried path and confirm it landed,
     # rather than a silent one-shot, so the first BillingData query doesn't fail later.
+    if ! resolve_storage_resource_id "${STORAGE_RESOURCE_ID:-}" "$STORAGE_ACCOUNT_NAME"; then
+      echo "   ⚠️  Billing storage '$STORAGE_ACCOUNT_NAME' not found — skipping Blob Data Reader grants."
+      echo "       Re-run after the FOCUS export destination exists, or the serverless view will fail to read blobs."
+    else
     if [ -n "$SYNAPSE_IDENTITY" ]; then
       assign_role_with_retry "$SYNAPSE_IDENTITY" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || \
         echo "   ⚠️  Could not confirm Storage Blob Data Reader for the Synapse identity."
@@ -928,6 +965,7 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
         --assignee "$CURRENT_USER_ID" \
         --scope "$STORAGE_RESOURCE_ID" \
         --only-show-errors >/dev/null 2>&1 || true
+    fi
     fi
 
     echo "⏳ Waiting for Synapse RBAC + firewall to propagate..."
