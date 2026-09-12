@@ -300,6 +300,59 @@ assign_role_with_retry() {
   done
 }
 
+list_billing_account_subscription_ids() {
+  local url
+  url="https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}/billingSubscriptions?api-version=${BILLING_API_VERSION}"
+  az rest --method GET --url "$url" 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+ids = []
+for item in data.get('value') or []:
+    props = item.get('properties') or {}
+    sid = props.get('subscriptionId') or item.get('name') or ''
+    sid = sid.replace('/subscriptions/', '').split('/')[0].strip().lower()
+    if sid:
+        ids.append(sid)
+print(' '.join(ids))
+" 2>/dev/null
+}
+
+grant_subscription_plane_roles() {
+  local sub_id="$1" scope
+  [ -z "$sub_id" ] && return 0
+  scope="/subscriptions/${sub_id}"
+  assign_role_with_retry "$SP_OBJECT_ID" "Reader" "$scope" || true
+  assign_role_with_retry "$SP_OBJECT_ID" "Monitoring Reader" "$scope" || true
+  assign_role_with_retry "$SP_OBJECT_ID" "Cost Management Reader" "$scope" || true
+}
+
+grant_billing_subscriptions_plane_roles() {
+  local sub_ids sub_id count=0
+  sub_ids=$(list_billing_account_subscription_ids)
+  if [ -z "$sub_ids" ]; then
+    echo "   ⚠️  No subscriptions returned from billingSubscriptions API; per-sub ARM roles skipped."
+    return 0
+  fi
+  echo "🔒 Assigning Reader / Monitoring Reader / Cost Management Reader on billed subscriptions..."
+  for sub_id in $sub_ids; do
+    echo "   - $sub_id"
+    grant_subscription_plane_roles "$sub_id"
+    count=$((count + 1))
+  done
+  echo "   ✅ Processed $count subscription(s) from billing account"
+}
+
+ensure_billing_storage_security() {
+  local storage_id="$1"
+  [ -z "$storage_id" ] && return 0
+  az rest --method PATCH \
+    --uri "https://management.azure.com${storage_id}?api-version=2023-01-01" \
+    --body '{"properties":{"allowBlobPublicAccess":false,"allowSharedKeyAccess":false,"publicNetworkAccess":"Enabled"}}' \
+    --output none 2>/dev/null \
+    && echo "   ✅ Billing storage hardened (shared-key access disabled)" \
+    || echo "   ⚠️  Could not patch billing storage security settings (may need Owner on storage)."
+}
+
 # Re-pin subscription context (Cloud Shell can drift after billing REST calls / long pauses).
 ensure_app_subscription() {
   local sub_name state err
@@ -404,7 +457,10 @@ create_storage_account() {
   "location": "${location}",
   "properties": {
     "isHnsEnabled": ${hns_prop},
-    "accessTier": "Hot"
+    "accessTier": "Hot",
+    "allowBlobPublicAccess": false,
+    "allowSharedKeyAccess": false,
+    "publicNetworkAccess": "Enabled"
   }
 }
 EOF
@@ -420,6 +476,10 @@ EOF
 build_billing_export_body() {
   cat <<EOF
 {
+  "identity": {
+    "type": "SystemAssigned"
+  },
+  "location": "${AZURE_REGION}",
   "properties": {
     "schedule": {
       "status": "Active",
@@ -464,24 +524,22 @@ EOF
 COST_EXPORT_API_VERSION="2025-03-01"
 
 # =====================================================================
-# Billing export + Synapse Analytics (FOCUS export at billing-account scope)
+# FOCUS billing export at billing-account scope (direct blob)
 # =====================================================================
-SYNAPSE_DEPLOYED="n"
+BILLING_EXPORT_DEPLOYED="n"
 RESOURCE_GROUP=""
 STORAGE_ACCOUNT_NAME=""
 CONTAINER_NAME=""
 ROOT_FOLDER=""
 EXPORT_NAME=""
-SYNAPSE_WORKSPACE=""
-BILLING_DATABASE="BillingAnalytics"
 
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo ""
-  echo "📊 Billing export + Synapse Analytics (billing-account FOCUS — all subscriptions)"
+  echo "📊 FOCUS billing export (billing-account scope — all subscriptions)"
   echo "---------------------------------------------------"
 
   if ! ensure_app_subscription; then
-    echo "   ⚠️  Skipping billing export + Synapse (fix subscription context and re-run)"
+    echo "   ⚠️  Skipping billing export (fix subscription context and re-run)"
   else
 
   RESOURCE_GROUP="rg-wiv"
@@ -509,13 +567,8 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "🔧 Ensuring required resource providers..."
   ensure_resource_provider "Microsoft.Storage" || echo "   ⚠️  Microsoft.Storage registration incomplete - storage create may fail"
   ensure_resource_provider "Microsoft.CostManagementExports" || echo "   ⚠️  Microsoft.CostManagementExports registration incomplete - billing export may fail"
-  ensure_resource_provider "Microsoft.Synapse" || echo "   ⚠️  Microsoft.Synapse registration incomplete - Synapse create may fail"
-  ensure_resource_provider "Microsoft.Sql" || echo "   ⚠️  Microsoft.Sql registration incomplete - Synapse SQL pool requires this"
 
   STORAGE_ACCOUNT_NAME="wivbill${UNIQUE_SUFFIX}"
-  SYNAPSE_STORAGE="wivsyn${UNIQUE_SUFFIX}"
-  SYNAPSE_WORKSPACE="wiv-synapse-${UNIQUE_SUFFIX}"
-  FILESYSTEM_NAME="synapsefilesystem"
   SKIP_EXPORT_CREATION="false"
 
   echo "🔒 Assigning Cost Management Reader (billing account + host subscription)..."
@@ -529,6 +582,7 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     --role "Cost Management Reader" \
     --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
     --only-show-errors 2>/dev/null || true
+  grant_billing_subscriptions_plane_roles
 
   EXPORT_SCOPE_BASE="https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}/providers/Microsoft.CostManagement/exports"
   EXISTING_EXPORT_CHECK=""
@@ -576,9 +630,10 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
       STORAGE_ACCOUNT_NAME="wivbill${UNIQUE_SUFFIX}"
       STORAGE_RESOURCE_ID=""
       SKIP_EXPORT_CREATION="false"
-      create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "true" || \
+      create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "false" || \
         echo "   ❌ Billing storage account setup failed (need Contributor + Microsoft.Storage registered)"
     else
+      BILLING_EXPORT_DEPLOYED="y"
       echo "   ✅ Reusing billing storage '$STORAGE_ACCOUNT_NAME'"
     fi
     EXISTING_FORMAT=$(printf '%s' "$EXISTING_EXPORT_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('properties',{}).get('format',''))" 2>/dev/null)
@@ -615,7 +670,7 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
         || echo "   ⚠️  Could not update existing export format - it may still be CSV until recreated"
     fi
   elif ! az storage account show --name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
-    create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "true" || \
+    create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "false" || \
       echo "   ❌ Billing storage account setup failed (need Contributor + Microsoft.Storage registered)"
   fi
 
@@ -659,6 +714,7 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
       fi
 
       if echo "$EXPORT_RESPONSE" | grep -qiE '"name"|"id"'; then
+        BILLING_EXPORT_DEPLOYED="y"
         echo "   ✅ FOCUS billing export created at billing-account scope (covers all subscriptions)"
         echo "🔄 Triggering immediate export run..."
         az rest --method POST \
@@ -685,606 +741,19 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
   fi
 
   echo ""
-  echo "🔷 Setting up Synapse Analytics workspace..."
-  ensure_app_subscription || true
-  SYNAPSE_REGION=""
-  SYNAPSE_OK="n"
-  SYNAPSE_EXISTS=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" --query name -o tsv 2>/dev/null)
-
-  # Subscriptions cap Synapse workspaces (PAYG default: 2). Offer to reuse an existing one, but let the user choose.
-  if [ -z "$SYNAPSE_EXISTS" ]; then
-    EXISTING_WS_NAMES=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" --query "[].name" -o tsv 2>/dev/null)
-    EXISTING_WS_COUNT=$(printf '%s\n' "$EXISTING_WS_NAMES" | grep -c . 2>/dev/null)
-    if [ "${EXISTING_WS_COUNT:-0}" -gt 0 ]; then
-      echo "   Existing Synapse workspaces in this subscription:"
-      az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
-        --query "[].{Name:name, Region:location, ResourceGroup:resourceGroup}" -o table 2>/dev/null | sed 's/^/     /'
-      echo ""
-      read -p "   Reuse an existing workspace instead of creating a new one? (y/n): " _REUSE_CHOICE
-      if [[ "$_REUSE_CHOICE" =~ ^[Yy]$ ]]; then
-        if [ "${EXISTING_WS_COUNT:-0}" -eq 1 ]; then
-          REUSE_WS=$(printf '%s\n' "$EXISTING_WS_NAMES" | head -n1)
-          echo "   Only one workspace found - reusing '$REUSE_WS'"
-        else
-          read -p "   Workspace name to reuse: " REUSE_WS
-        fi
-        if [ -n "$REUSE_WS" ]; then
-          REUSE_RG=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
-            --query "[?name=='${REUSE_WS}'].resourceGroup | [0]" -o tsv 2>/dev/null)
-          if [ -n "$REUSE_RG" ]; then
-            SYNAPSE_WORKSPACE="$REUSE_WS"
-            RESOURCE_GROUP="$REUSE_RG"
-            SYNAPSE_EXISTS="$REUSE_WS"
-          else
-            echo "   ⚠️  '$REUSE_WS' not found - will create a new workspace instead."
-          fi
-        fi
-      fi
-    fi
-  fi
-
-  if [ -n "$SYNAPSE_EXISTS" ]; then
-    echo "   ✅ Synapse workspace '$SYNAPSE_WORKSPACE' already exists"
-    SYNAPSE_OK="y"
-    SYNAPSE_REGION=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" --query location -o tsv 2>/dev/null)
-    SYNAPSE_STORAGE=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" \
-      --query "defaultDataLakeStorage.accountUrl" -o tsv | sed 's|https://||; s|.dfs.core.windows.net||')
-    FILESYSTEM_NAME=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" \
-      --query "defaultDataLakeStorage.filesystem" -o tsv)
-  else
-    SQL_ADMIN_USER="sqladminuser"
-    SQL_ADMIN_PASSWORD="P@ssw0rd${UNIQUE_SUFFIX}!"
-    SYNAPSE_CREATE_OUT="not-attempted"
-
-    echo "   Synapse must be created in a region that allows SQL provisioning for this subscription."
-    echo "   Suggested SQL-capable regions: westeurope, northeurope, eastus, westus2, swedencentral, uksouth"
-    echo "   (billing storage stays in $AZURE_REGION; Synapse serverless reads it cross-region)"
-
-    while true; do
-      read -p "   Synapse region [$AZURE_REGION] (or 'skip' to skip Synapse): " SYNAPSE_REGION
-      SYNAPSE_REGION="${SYNAPSE_REGION:-$AZURE_REGION}"
-
-      if [ "$SYNAPSE_REGION" = "skip" ]; then
-        echo "   ⏭️  Skipping Synapse workspace creation (per user choice)."
-        SYNAPSE_CREATE_OUT="skipped"
-        break
-      fi
-
-      if ! az account list-locations --query "[?name=='${SYNAPSE_REGION}'].name | [0]" -o tsv 2>/dev/null | grep -q .; then
-        echo "   ⚠️  '$SYNAPSE_REGION' is not a valid Azure region name. Try again (e.g. westeurope)."
-        continue
-      fi
-
-      REGION_TAG=$(printf '%s' "$SYNAPSE_REGION" | tr -cd 'a-z0-9' | cut -c1-6)
-      if [ "$SYNAPSE_REGION" = "$AZURE_REGION" ]; then
-        TRY_SYNAPSE_STORAGE="$SYNAPSE_STORAGE"
-      else
-        TRY_SYNAPSE_STORAGE=$(printf 'wivsyn%s%s' "$UNIQUE_SUFFIX" "$REGION_TAG" | cut -c1-24)
-      fi
-
-      if ! az storage account show --name "$TRY_SYNAPSE_STORAGE" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
-        create_storage_account "$TRY_SYNAPSE_STORAGE" "$RESOURCE_GROUP" "$SYNAPSE_REGION" "true" || {
-          echo "   ⚠️  Could not create Synapse storage in $SYNAPSE_REGION. Pick another region."
-          continue
-        }
-      fi
-
-      DATALAKE_RESOURCE_ID=$(az storage account show \
-        --name "$TRY_SYNAPSE_STORAGE" \
-        --resource-group "$RESOURCE_GROUP" \
-        --query id -o tsv 2>/dev/null)
-      [ -z "$DATALAKE_RESOURCE_ID" ] && { echo "   ⚠️  Synapse storage not found after create. Pick another region."; continue; }
-
-      assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Contributor" "$DATALAKE_RESOURCE_ID" || true
-      az storage fs create \
-        --name "$FILESYSTEM_NAME" \
-        --account-name "$TRY_SYNAPSE_STORAGE" \
-        --auth-mode login \
-        --only-show-errors >/dev/null 2>&1 || true
-
-      echo "🏗️  Creating Synapse workspace in $SYNAPSE_REGION (may take 5-10 minutes)..."
-      ensure_app_subscription || true
-      SYNAPSE_CREATE_OUT=$(az synapse workspace create \
-        --name "$SYNAPSE_WORKSPACE" \
-        --resource-group "$RESOURCE_GROUP" \
-        --storage-account "$TRY_SYNAPSE_STORAGE" \
-        --file-system "$FILESYSTEM_NAME" \
-        --sql-admin-login-user "$SQL_ADMIN_USER" \
-        --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
-        --location "$SYNAPSE_REGION" \
-        --only-show-errors 2>&1) && SYNAPSE_CREATE_OUT=""
-
-      if [ -n "$SYNAPSE_CREATE_OUT" ] && echo "$SYNAPSE_CREATE_OUT" | grep -qiE "CustomerSubscriptionNotRegisteredWithSqlRp|Microsoft\.Sql"; then
-        echo "   ⚠️  Microsoft.Sql not registered - registering and retrying in $SYNAPSE_REGION..."
-        ensure_resource_provider "Microsoft.Sql" || true
-        sleep 15
-        SYNAPSE_CREATE_OUT=$(az synapse workspace create \
-          --name "$SYNAPSE_WORKSPACE" \
-          --resource-group "$RESOURCE_GROUP" \
-          --storage-account "$TRY_SYNAPSE_STORAGE" \
-          --file-system "$FILESYSTEM_NAME" \
-          --sql-admin-login-user "$SQL_ADMIN_USER" \
-          --sql-admin-login-password "$SQL_ADMIN_PASSWORD" \
-          --location "$SYNAPSE_REGION" \
-          --only-show-errors 2>&1) && SYNAPSE_CREATE_OUT=""
-      fi
-
-      if [ -z "$SYNAPSE_CREATE_OUT" ]; then
-        SYNAPSE_STORAGE="$TRY_SYNAPSE_STORAGE"
-        SYNAPSE_OK="y"
-        echo "   ✅ Synapse workspace created in $SYNAPSE_REGION"
-        break
-      fi
-
-      if echo "$SYNAPSE_CREATE_OUT" | grep -qiE "SqlServerRegionDoesNotAllowProvisioning|not accepting creation"; then
-        echo "   ⚠️  $SYNAPSE_REGION does not allow new SQL servers for this subscription. Choose a different region."
-        continue
-      fi
-
-      if echo "$SYNAPSE_CREATE_OUT" | grep -qiE "ReachedPerSubscriptionWorkspaceLimit|maximum number of Synapse"; then
-        echo "   ⚠️  Subscription Synapse workspace limit reached - attempting to reuse an existing workspace..."
-        REUSE_WS=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
-          --query "[?starts_with(name, 'wiv-synapse-')].name | [0]" -o tsv 2>/dev/null)
-        [ -z "$REUSE_WS" ] && REUSE_WS=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" --query "[0].name" -o tsv 2>/dev/null)
-        if [ -n "$REUSE_WS" ]; then
-          REUSE_RG=$(az synapse workspace list --subscription "$APP_SUBSCRIPTION_ID" \
-            --query "[?name=='${REUSE_WS}'].resourceGroup | [0]" -o tsv 2>/dev/null)
-          SYNAPSE_WORKSPACE="$REUSE_WS"
-          [ -n "$REUSE_RG" ] && RESOURCE_GROUP="$REUSE_RG"
-          SYNAPSE_REGION=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)
-          SYNAPSE_STORAGE=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" \
-            --query "defaultDataLakeStorage.accountUrl" -o tsv | sed 's|https://||; s|.dfs.core.windows.net||')
-          FILESYSTEM_NAME=$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" \
-            --query "defaultDataLakeStorage.filesystem" -o tsv)
-          SYNAPSE_CREATE_OUT=""
-          SYNAPSE_OK="y"
-          echo "   ♻️  Reusing existing Synapse workspace '$SYNAPSE_WORKSPACE'"
-        else
-          echo "   ❌ No existing Synapse workspace found to reuse. Delete an unused workspace or request a limit increase."
-        fi
-        break
-      fi
-
-      echo "   ❌ Synapse workspace creation failed in $SYNAPSE_REGION: ${SYNAPSE_CREATE_OUT:0:400}"
-      read -p "   Try a different region? (y/n): " _RETRY_SYNAPSE
-      [[ "$_RETRY_SYNAPSE" =~ ^[Yy]$ ]] && continue
-      break
-    done
-
-    if [ "$SYNAPSE_CREATE_OUT" = "skipped" ]; then
-      echo "   ⏭️  Synapse not created. Re-run later and choose a region to enable analytics."
-    elif [ -n "$SYNAPSE_CREATE_OUT" ] && [ -z "$(az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --query name -o tsv 2>/dev/null)" ]; then
-      echo "   ❌ Synapse workspace was not created."
-      echo "      Existing workspaces count toward the per-subscription limit (PAYG default: 2)."
-      echo "      Delete an unused one (az synapse workspace delete) or request a limit increase, then re-run."
-    fi
-  fi
-
-  if [ "$SYNAPSE_OK" != "y" ]; then
-    for _i in 1 2 3; do
-      if az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" >/dev/null 2>&1; then
-        SYNAPSE_OK="y"
-        break
-      fi
-      sleep 10
-    done
-  fi
-
-  if [ "$SYNAPSE_OK" = "y" ]; then
-    echo "⏳ Waiting for Synapse workspace to be ready..."
-    az synapse workspace wait --resource-group "$RESOURCE_GROUP" --workspace-name "$SYNAPSE_WORKSPACE" --subscription "$APP_SUBSCRIPTION_ID" --created 2>/dev/null || sleep 30
-
-    echo "🔥 Configuring Synapse firewall..."
-    # 0.0.0.0-0.0.0.0 is the special "Allow Azure services" toggle - it does NOT let
-    # real client IPs (Cloud Shell egress or your browser for Synapse Studio) connect.
-    az synapse workspace firewall-rule create \
-      --name "AllowAllWindowsAzureIps" \
-      --workspace-name "$SYNAPSE_WORKSPACE" \
-      --resource-group "$RESOURCE_GROUP" \
-      --subscription "$APP_SUBSCRIPTION_ID" \
-      --start-ip-address "0.0.0.0" \
-      --end-ip-address "0.0.0.0" \
-      --only-show-errors >/dev/null 2>&1 || true
-    # Allow all client IPs so both this Cloud Shell and Synapse Studio (browser) can
-    # reach the serverless SQL endpoint. Access is still gated by Entra auth + SQL perms.
-    az synapse workspace firewall-rule create \
-      --name "AllowAll" \
-      --workspace-name "$SYNAPSE_WORKSPACE" \
-      --resource-group "$RESOURCE_GROUP" \
-      --subscription "$APP_SUBSCRIPTION_ID" \
-      --start-ip-address "0.0.0.0" \
-      --end-ip-address "255.255.255.255" \
-      --only-show-errors >/dev/null 2>&1 || true
-    # Also pin this client's public IP explicitly (belt and suspenders).
-    CLIENT_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "")
-    if [ -n "$CLIENT_IP" ]; then
-      az synapse workspace firewall-rule create \
-        --name "ClientIP_$(echo "$CLIENT_IP" | tr . _)" \
-        --workspace-name "$SYNAPSE_WORKSPACE" \
-        --resource-group "$RESOURCE_GROUP" \
-        --subscription "$APP_SUBSCRIPTION_ID" \
-        --start-ip-address "$CLIENT_IP" \
-        --end-ip-address "$CLIENT_IP" \
-        --only-show-errors >/dev/null 2>&1 || true
-    fi
-    echo "   ⏳ Waiting ~60s for firewall rules to propagate..."
-    sleep 60
-
-    echo "🔐 Granting Synapse roles..."
-    if [ -n "$CURRENT_USER_ID" ]; then
-      az synapse role assignment create \
-        --workspace-name "$SYNAPSE_WORKSPACE" \
-        --role "Synapse Administrator" \
-        --assignee "$CURRENT_USER_ID" \
-        --only-show-errors >/dev/null 2>&1 || true
-      az synapse role assignment create \
-        --workspace-name "$SYNAPSE_WORKSPACE" \
-        --role "Synapse SQL Administrator" \
-        --assignee "$CURRENT_USER_ID" \
-        --only-show-errors >/dev/null 2>&1 || true
-    fi
-    az synapse role assignment create \
-      --workspace-name "$SYNAPSE_WORKSPACE" \
-      --role "Synapse Administrator" \
-      --assignee "$SP_OBJECT_ID" \
-      --only-show-errors >/dev/null 2>&1 || true
-    az synapse role assignment create \
-      --workspace-name "$SYNAPSE_WORKSPACE" \
-      --role "Synapse SQL Administrator" \
-      --assignee "$SP_OBJECT_ID" \
-      --only-show-errors >/dev/null 2>&1 || true
-
-    SYNAPSE_IDENTITY=$(az synapse workspace show \
-      --name "$SYNAPSE_WORKSPACE" \
-      --resource-group "$RESOURCE_GROUP" \
-      --subscription "$APP_SUBSCRIPTION_ID" \
-      --query "identity.principalId" -o tsv 2>/dev/null)
-
-    echo "🔐 Granting storage access on billing export storage..."
-    # On reuse (existing workspace, NEW billing storage) this grant is what makes the
-    # serverless view readable. Use the verified/retried path and confirm it landed,
-    # rather than a silent one-shot, so the first BillingData query doesn't fail later.
-    if ! resolve_storage_resource_id "${STORAGE_RESOURCE_ID:-}" "$STORAGE_ACCOUNT_NAME"; then
-      echo "   ⚠️  Billing storage '$STORAGE_ACCOUNT_NAME' not found — skipping Blob Data Reader grants."
-      echo "       Re-run after the FOCUS export destination exists, or the serverless view will fail to read blobs."
-    else
-    if [ -n "$SYNAPSE_IDENTITY" ]; then
-      assign_role_with_retry "$SYNAPSE_IDENTITY" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || \
-        echo "   ⚠️  Could not confirm Storage Blob Data Reader for the Synapse identity."
-      if az role assignment list --assignee "$SYNAPSE_IDENTITY" --scope "$STORAGE_RESOURCE_ID" \
-           --query "[?roleDefinitionName=='Storage Blob Data Reader'] | [0]" -o tsv 2>/dev/null | grep -q .; then
-        echo "   ✅ Synapse identity has Storage Blob Data Reader on $STORAGE_ACCOUNT_NAME"
-      else
-        echo "   ⚠️  Grant not visible yet (will warm up after view creation)."
-      fi
-    fi
+  echo "🔐 Granting Storage Blob Data Reader on billing export storage to the SP..."
+  if resolve_storage_resource_id "${STORAGE_RESOURCE_ID:-}" "$STORAGE_ACCOUNT_NAME"; then
+    BILLING_EXPORT_DEPLOYED="y"
+    ensure_billing_storage_security "$STORAGE_RESOURCE_ID"
     assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || true
-    if [ -n "$CURRENT_USER_ID" ]; then
-      az role assignment create \
-        --role "Storage Blob Data Reader" \
-        --assignee "$CURRENT_USER_ID" \
-        --scope "$STORAGE_RESOURCE_ID" \
-        --only-show-errors >/dev/null 2>&1 || true
-    fi
-    fi
-
-    echo "⏳ Waiting for Synapse RBAC + firewall to propagate..."
-    sleep 60
-
-    echo ""
-    echo "🔧 Creating $BILLING_DATABASE database and FOCUS views..."
-    ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-    DATABASE_CREATED=false
-
-    if [ -n "$ACCESS_TOKEN" ]; then
-      # IMPORTANT: the Synapse serverless SQL pool only speaks the TDS protocol on
-      # ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net:1433. There is NO HTTP REST
-      # "run query" API - posting to /sql/databases/<db>/query always returns HTTP 500.
-      # So we run T-SQL through a real driver (mssql-python, or pyodbc + msodbcsql18),
-      # authenticating as the current Cloud Shell user (granted Synapse/SQL admin above).
-      SQL_SERVER="${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
-
-      echo "  Preparing SQL client (serverless SQL pool needs a TDS driver)..."
-      SQL_DRIVER=""
-      if python3 -c 'import mssql_python' 2>/dev/null; then
-        SQL_DRIVER="mssql_python"
-      elif python3 -m pip install --quiet --user --disable-pip-version-check mssql-python 2>/dev/null && python3 -c 'import mssql_python' 2>/dev/null; then
-        SQL_DRIVER="mssql_python"
-      elif python3 -c 'import pyodbc' 2>/dev/null; then
-        SQL_DRIVER="pyodbc"
-      else
-        echo "    Installing ODBC driver + pyodbc (one-time)..."
-        sudo ACCEPT_EULA=Y tdnf install -y msodbcsql18 >/dev/null 2>&1 || true
-        if python3 -m pip install --quiet --user --disable-pip-version-check pyodbc 2>/dev/null && python3 -c 'import pyodbc' 2>/dev/null; then
-          SQL_DRIVER="pyodbc"
-        fi
-      fi
-      if [ -n "$SQL_DRIVER" ]; then
-        echo "    ✅ SQL client ready ($SQL_DRIVER)"
-      else
-        echo "    ⚠️  Could not install a SQL driver - Synapse SQL setup will be skipped"
-      fi
-
-      # Python helper: runs one T-SQL batch from stdin, retrying while the serverless
-      # pool resumes from cold (it pauses when idle and takes ~30-90s to wake up).
-      SQL_HELPER="$HOME/.wiv_sqlexec.py"
-      cat > "$SQL_HELPER" <<'PYEOF'
-import os, sys, time
-
-server = sys.argv[1]
-database = sys.argv[2]
-query = sys.stdin.read()
-token = os.environ.get("WIV_SQL_TOKEN", "")
-driver = os.environ.get("WIV_SQL_DRIVER", "")
-
-
-def connect_mssql():
-    from mssql_python import connect
-    return connect(
-        f"Server={server};Database={database};"
-        "Authentication=ActiveDirectoryDefault;Encrypt=yes;"
-        "TrustServerCertificate=no;"
-    )
-
-
-def connect_pyodbc():
-    import struct
-    import pyodbc
-    SQL_COPT_SS_ACCESS_TOKEN = 1256
-    exptoken = b"".join(bytes([b, 0]) for b in token.encode("utf-8"))
-    tokenstruct = struct.pack("=i", len(exptoken)) + exptoken
-    return pyodbc.connect(
-        f"Driver={{ODBC Driver 18 for SQL Server}};Server={server};"
-        f"Database={database};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;",
-        attrs_before={SQL_COPT_SS_ACCESS_TOKEN: tokenstruct},
-    )
-
-
-make_conn = connect_mssql if driver == "mssql_python" else connect_pyodbc
-
-last = ""
-for attempt in range(12):
-    try:
-        conn = make_conn()
-        try:
-            conn.setautocommit(True)
-        except Exception:
-            try:
-                conn.autocommit = True
-            except Exception:
-                pass
-        cur = conn.cursor()
-        cur.execute(query)
-        try:
-            cur.fetchall()
-        except Exception:
-            pass
-        cur.close()
-        conn.close()
-        print("OK")
-        sys.exit(0)
-    except Exception as exc:
-        last = str(exc)
-        transient = any(
-            s in last
-            for s in (
-                "40613", "resuming", "is not currently available", "timeout",
-                "Timeout", "10060", "08001", "HYT00", "Login timeout", "TCP Provider",
-                # Synapse serverless CREATE DATABASE races on the shared 'model' DB.
-                "exclusive lock on database 'model'",
-                "Could not obtain exclusive lock",
-                "Retry the operation later",
-            )
-        )
-        if attempt < 11 and transient:
-            time.sleep(15 + attempt * 5)
-            continue
-        break
-sys.stderr.write(last[:400])
-sys.exit(1)
-PYEOF
-
-      # Same signature as before: execute_sql <database> <query> <description>.
-      execute_sql() {
-        local database=$1 query=$2 description=$3 err
-        echo "  $description..."
-        if [ -z "$SQL_DRIVER" ]; then
-          echo "    ⚠️  No SQL driver available - skipped"
-          return 1
-        fi
-        ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-        if WIV_SQL_TOKEN="$ACCESS_TOKEN" WIV_SQL_DRIVER="$SQL_DRIVER" \
-            python3 "$SQL_HELPER" "$SQL_SERVER" "$database" <<< "$query" >/dev/null 2>/tmp/wiv_sql_err; then
-          echo "    ✅ Success"
-          return 0
-        fi
-        err=$(tr -d '\n' < /tmp/wiv_sql_err 2>/dev/null | cut -c1-500)
-        echo "    ⚠️  Failed: ${err:-unknown error}"
-        return 1
-      }
-
-      # CREATE DATABASE on Synapse serverless often fails with exclusive lock on 'model'.
-      # Retry until the DB is visible in sys.databases before any BillingAnalytics work.
-      ensure_billing_database() {
-        local _try _exists
-        for _try in $(seq 1 15); do
-          if execute_sql "master" \
-              "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '${BILLING_DATABASE}') CREATE DATABASE [${BILLING_DATABASE}]" \
-              "Creating database ${BILLING_DATABASE} (attempt ${_try}/15)"; then
-            :
-          fi
-          sleep 5
-          if execute_sql "master" \
-              "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = '${BILLING_DATABASE}') RAISERROR('BillingAnalytics not visible yet', 16, 1)" \
-              "Verifying database ${BILLING_DATABASE} exists"; then
-            echo "    ✅ Database ${BILLING_DATABASE} is ready"
-            return 0
-          fi
-          echo "    ⏳ Database not ready yet (common after model-lock contention) - waiting 20s..."
-          sleep 20
-        done
-        return 1
-      }
-
-      # First query resumes the serverless pool; the helper already retries on cold start.
-      if [ -n "$SQL_DRIVER" ]; then
-        echo "  Warming up serverless SQL endpoint (first query resumes the pool)..."
-        ACCESS_TOKEN=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv 2>/dev/null)
-        if WIV_SQL_TOKEN="$ACCESS_TOKEN" WIV_SQL_DRIVER="$SQL_DRIVER" \
-            python3 "$SQL_HELPER" "$SQL_SERVER" "master" <<< "SELECT 1" >/dev/null 2>&1; then
-          echo "    ✅ Endpoint responsive"
-        else
-          echo "    ⏳ Endpoint still resuming - continuing (each statement retries)"
-        fi
-      fi
-
-      if ! ensure_billing_database; then
-        echo "   ❌ Could not create database ${BILLING_DATABASE} (Synapse model lock / permissions)."
-        echo "      Re-run this script in a few minutes - it is idempotent and will resume SQL setup."
-      else
-      # FOCUS Parquet strings are UTF-8; without a UTF-8 collation, VARCHAR reads raise conversion warnings.
-      execute_sql "master" \
-        "IF EXISTS (SELECT 1 FROM sys.databases WHERE name = '${BILLING_DATABASE}') ALTER DATABASE [${BILLING_DATABASE}] COLLATE Latin1_General_100_CI_AS_SC_UTF8" \
-        "Setting UTF-8 database collation"
-      sleep 3
-
-      MASTER_KEY_PASSWORD="StrongP@ssw0rd${UNIQUE_SUFFIX}!"
-      execute_sql "$BILLING_DATABASE" \
-        "IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') CREATE MASTER KEY ENCRYPTION BY PASSWORD = '${MASTER_KEY_PASSWORD}'" \
-        "Creating master key"
-      sleep 3
-
-      execute_sql "$BILLING_DATABASE" \
-        "IF NOT EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'WorkspaceIdentity') CREATE DATABASE SCOPED CREDENTIAL WorkspaceIdentity WITH IDENTITY = 'Managed Identity'" \
-        "Creating credential"
-      sleep 3
-
-      # NOTE: the external data source is (re)created AFTER the view is dropped (below),
-      # because it must always point at the CURRENT storage account. On a reused
-      # workspace the BillingAnalytics DB persists, so an IF NOT EXISTS data source
-      # would keep pointing at a previous run's storage -> "cannot be listed".
-
-      execute_sql "$BILLING_DATABASE" \
-        "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '${APP_DISPLAY_NAME}') CREATE USER [${APP_DISPLAY_NAME}] FROM EXTERNAL PROVIDER" \
-        "Creating user for service principal"
-      sleep 2
-
-      execute_sql "$BILLING_DATABASE" "ALTER ROLE db_datareader ADD MEMBER [${APP_DISPLAY_NAME}]" "Granting db_datareader"
-      execute_sql "$BILLING_DATABASE" "ALTER ROLE db_datawriter ADD MEMBER [${APP_DISPLAY_NAME}]" "Granting db_datawriter"
-      execute_sql "$BILLING_DATABASE" "ALTER ROLE db_ddladmin ADD MEMBER [${APP_DISPLAY_NAME}]" "Granting db_ddladmin"
-      sleep 3
-
-      execute_sql "$BILLING_DATABASE" \
-        "IF OBJECT_ID('BillingData', 'V') IS NOT NULL DROP VIEW BillingData" \
-        "Dropping existing BillingData view"
-
-      # Recreate the data source so it always points at THIS run's storage account.
-      # (Drop requires no dependent views, hence after the view drop above.)
-      execute_sql "$BILLING_DATABASE" \
-        "IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'BillingStorage') DROP EXTERNAL DATA SOURCE BillingStorage" \
-        "Dropping existing external data source (point at current storage)"
-      sleep 2
-      execute_sql "$BILLING_DATABASE" \
-        "CREATE EXTERNAL DATA SOURCE BillingStorage WITH (LOCATION = 'abfss://${CONTAINER_NAME}@${STORAGE_ACCOUNT_NAME}.dfs.core.windows.net/', CREDENTIAL = WorkspaceIdentity)" \
-        "Creating external data source -> ${STORAGE_ACCOUNT_NAME}"
-      sleep 2
-
-      # OverwritePreviousReport FOCUS parquet:
-      # <root>/<export>/<daterange>/<guid>/part_*.snappy.parquet
-      # Omit OPENROWSET WITH so Synapse binds columns from Parquet metadata.
-      # CREATE VIEW then needs at least one matching file; retry until the first
-      # export is listable.
-      BILLING_BULK_PATH="${ROOT_FOLDER}/${EXPORT_NAME}/*/*/*.parquet"
-      BILLING_VIEW_SQL="CREATE OR ALTER VIEW BillingData AS
-SELECT *
-FROM OPENROWSET(
-    BULK '${BILLING_BULK_PATH}',
-    DATA_SOURCE = 'BillingStorage',
-    FORMAT = 'PARQUET'
-) AS BillingExport"
-
-      echo "  Creating FOCUS BillingData view (retries until Parquet files are listable, up to ~13 min)..."
-      for _vtry in $(seq 1 18); do
-        if execute_sql "$BILLING_DATABASE" "$BILLING_VIEW_SQL" "Creating BillingData view (${_vtry}/18)"; then
-          DATABASE_CREATED=true
-          break
-        fi
-        sleep 45
-      done
-      if [ "$DATABASE_CREATED" != "true" ]; then
-        echo "   ❌ Could not create BillingData (no Parquet files listable yet)."
-        echo "      Re-run this script after the first FOCUS export lands — it is idempotent."
-      fi
-
-      # Storage data-plane RBAC for the Synapse identity can take several minutes to
-      # propagate to the serverless endpoint. CREATE VIEW does NOT validate data access,
-      # so the first real SELECT (here or from the backend) is what fails. Warm it up and
-      # verify BillingData is actually readable before we finish, so reuse runs don't
-      # leave a view that errors with "cannot be listed" on first query.
-      if [ "$DATABASE_CREATED" = "true" ]; then
-        # A freshly-granted Storage Blob Data Reader is NOT effective immediately on the
-        # serverless endpoint: on-demand SQL caches the earlier "denied" result and keeps
-        # returning "cannot be listed" until that negative-auth cache expires (~10 min).
-        # RBAC + firewall are already correct by here, so we wait out the cache (up to
-        # ~13 min) and verify a real read succeeds before declaring success.
-        echo "  Verifying BillingData is readable (waiting out serverless auth cache, up to ~13 min)..."
-        echo "  (RBAC + firewall are already set; this is just propagation - it is safe to leave running.)"
-        BILLING_READABLE="false"
-        for _vtry in $(seq 1 18); do
-          if execute_sql "$BILLING_DATABASE" "SELECT TOP 1 1 AS ok FROM BillingData" "Validation read (${_vtry}/18)"; then
-            BILLING_READABLE="true"
-            echo "  ✅ BillingData is queryable"
-            break
-          fi
-          sleep 45
-        done
-        if [ "$BILLING_READABLE" != "true" ]; then
-          echo "  ⚠️  BillingData still not readable after ~13 min. Remaining causes:"
-          echo "       - Serverless auth cache not cleared yet (wait a few more min, retry once)"
-          echo "       - First export files have not landed yet (can take 5-30 min)"
-          echo "     Setup is otherwise complete - re-run 'SELECT TOP 10 * FROM BillingData' shortly."
-        fi
-      fi
-      fi  # ensure_billing_database
-    else
-      echo "   ⚠️  Could not obtain database access token - Synapse SQL setup skipped"
-    fi
-
-    cat > synapse_config.py <<EOF
-# Auto-generated Synapse configuration for Wiv billing analytics
-SYNAPSE_CONFIG = {
-    'tenant_id': '${TENANT_ID}',
-    'client_id': '${APP_ID}',
-    'client_secret': '${CLIENT_SECRET}',
-    'workspace_name': '${SYNAPSE_WORKSPACE}',
-    'database_name': '${BILLING_DATABASE}',
-    'storage_account': '${STORAGE_ACCOUNT_NAME}',
-    'container': '${CONTAINER_NAME}',
-    'export_path': '${ROOT_FOLDER}',
-    'export_name': '${EXPORT_NAME}',
-    'resource_group': '${RESOURCE_GROUP}',
-    'subscription_id': '${APP_SUBSCRIPTION_ID}',
-    'billing_account_name': '${BILLING_ACCOUNT_NAME}',
-    'agreement_type': '${AGREEMENT}',
-    'export_format': 'FOCUS'
-}
-EOF
-    echo "   ✅ synapse_config.py written"
-
-    if [ "$DATABASE_CREATED" = "true" ]; then
-      SYNAPSE_DEPLOYED="y"
-      echo "   ✅ Synapse SQL setup complete (first export files may take 5-30 min to appear)"
-    else
-      echo "   ⚠️  Synapse workspace created but SQL setup incomplete - re-run or check permissions"
-    fi
   else
-    echo "   ⚠️  Synapse workspace not available - skipping SQL setup"
+    echo "   ⚠️  Billing storage not found yet - grant Blob Data Reader after export storage exists."
   fi
 
   fi
 else
   echo ""
-  echo "⏭️  Skipping billing export + Synapse (no billing account selected)"
+  echo "⏭️  Skipping billing export (no billing account selected)"
 fi
 
 # =====================================================================
@@ -1342,7 +811,8 @@ else
 fi
 
 if [ -n "$MG_ID" ]; then
-  echo "   Assigning Monitoring Reader at management group '$MG_ID'..."
+  echo "   Assigning Reader + Monitoring Reader at management group '$MG_ID'..."
+  assign_role_with_retry "$SP_OBJECT_ID" "Reader" "/providers/Microsoft.Management/managementGroups/${MG_ID}" || true
   assign_role_with_retry "$SP_OBJECT_ID" "Monitoring Reader" "/providers/Microsoft.Management/managementGroups/${MG_ID}" \
     && MG_LABEL="$MG_ID (inherits to all subs under it)"
 fi
@@ -1384,29 +854,15 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "📄 Cost scope:       billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
 fi
 echo "📄 Metrics scope:    $MG_LABEL"
-if [ "$SYNAPSE_DEPLOYED" = "y" ]; then
+if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
   echo ""
-  echo "📊 Billing export + Synapse:"
+  echo "📊 FOCUS billing export (blob):"
   echo "📄 Resource group:   $RESOURCE_GROUP"
   echo "📄 Storage account:  $STORAGE_ACCOUNT_NAME"
   echo "📄 Container:        $CONTAINER_NAME"
-  echo "📄 Export name:      $EXPORT_NAME (FOCUS, Parquet/Snappy, daily, billing-account scope - all subscriptions)"
+  echo "📄 Export name:      $EXPORT_NAME (FOCUS, Parquet/Snappy, daily, billing-account scope)"
   echo "📄 Export path:      $ROOT_FOLDER/${EXPORT_NAME}/"
-  echo "📄 Synapse workspace: $SYNAPSE_WORKSPACE"
-  [ -n "$SYNAPSE_REGION" ] && echo "📄 Synapse region:    $SYNAPSE_REGION"
-  echo "📄 Synapse endpoint: ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
-  echo "📄 Database:         $BILLING_DATABASE (view: BillingData)"
-  echo "📄 Config file:      synapse_config.py"
-fi
-if [ -n "$SYNAPSE_WORKSPACE" ] && az synapse workspace show --name "$SYNAPSE_WORKSPACE" --resource-group "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" >/dev/null 2>&1; then
-  export SYNAPSE_WORKSPACE
-  export SYNAPSE_SERVERLESS_ENDPOINT="${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
-  echo ""
-  echo "📄 Synapse workspace name: $SYNAPSE_WORKSPACE"
-  echo "📄 Synapse SQL endpoint:   ${SYNAPSE_WORKSPACE}-ondemand.sql.azuresynapse.net"
-  printf 'SYNAPSE_WORKSPACE=%s\nSYNAPSE_SERVERLESS_ENDPOINT=%s-ondemand.sql.azuresynapse.net\n' \
-    "$SYNAPSE_WORKSPACE" "$SYNAPSE_WORKSPACE" > synapse_workspace.env
-  echo "   (also written to synapse_workspace.env and exported to this shell)"
+  echo "📄 Billing query:    direct blob (matches Wiv product onboarding)"
 fi
 
 echo ""
