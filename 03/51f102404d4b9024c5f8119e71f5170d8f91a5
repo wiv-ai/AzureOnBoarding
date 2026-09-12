@@ -1,0 +1,43 @@
+.cloudshell/startup.sh
+  s_6b6c739d6ad976::t_1e90cc4b31cae1 633
+  s_6b6c739d6ad976::t_c66ead1d937923 585
+  s_6b6c739d6ad976::t_e876fdbf418bea 814-815
+  s_6b6c739d6ad976::t_71203aa86b54a9 460-463
+  s_6b6c739d6ad976::t_b9e3e1bbfd80c5 636
+  s_6b6c739d6ad976::t_b5ec5946275aea 756
+  s_6b6c739d6ad976::t_7a492d19b8630f 542
+  s_6b6c739d6ad976::t_7818dfdae680a8 479-482
+  s_6b6c739d6ad976::t_5f90631bcc1a5a 527
+  s_6b6c739d6ad976::t_bb5bfbde0399e6 673
+  s_6b6c739d6ad976::t_1958ec23178c9a 744-746,750
+  s_6b6c739d6ad976::t_e7f581b57bea8f 529
+  s_6b6c739d6ad976::t_49da12a4f822c0 538
+  s_6b6c739d6ad976::t_4c6c2f3f490f57 747
+  s_6b6c739d6ad976::t_6868812e5441b7 303-344
+  s_6b6c739d6ad976::t_f5e16ce1b3a955 345-355
+  s_6b6c739d6ad976::t_12ac2ee1a57e0a 857,859,863,865
+  s_6b6c739d6ad976::t_bf7ed06781c6a8 717
+README.md
+  s_6b6c739d6ad976::t_4a594326d9e6e9 1,3,5,7,9-17,19,21-23,25,27,30-31,34,37,40,42-44,46,48,50-58,61,63,65-77,80,82,84-87,89,91-95,97,99-101,103,105,107-112,114,116,118-124,126,128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0351f102404d4b9024c5f8119e71f5170d8f91a5",
+  "prompts": {},
+  "humans": {
+    "h_701710ebe0bafa": {
+      "author": "Dotan Cohen <dotan@wiv.ai>"
+    }
+  },
+  "sessions": {
+    "s_6b6c739d6ad976": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "5da0492b-6df4-474f-9205-34f49cf9e51f",
+        "model": "auto-smart"
+      },
+      "human_author": "Dotan Cohen <dotan@wiv.ai>"
+    }
+  }
+}
