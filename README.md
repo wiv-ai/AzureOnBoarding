@@ -14,7 +14,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 | **FOCUS export** | Daily Parquet/Snappy at billing-account scope → `rg-wiv` storage |
 | **Export identity** | System-assigned managed identity on the export (required when storage has `allowSharedKeyAccess=false`) |
 | **Blob access** | Storage Blob Data Reader on the export storage account for the SP |
-| **Metrics (optional)** | Reader + Monitoring Reader at a management group (inherits to subs under the MG) |
+| **Management group (optional)** | Reader + Monitoring Reader at a management group (inherits to subs under the MG, including new ones you place there) |
 
 ## Prerequisites
 
@@ -41,7 +41,7 @@ bash .cloudshell/startup.sh
 
 - Pick the **host subscription** (where `rg-wiv` and billing storage live)
 - Paste the **billing account name** from `az billing account list`
-- Optionally assign **management group** metrics scope (Enter to skip)
+- Optionally select a **management group** from the numbered list (or **Skip** — new subscriptions will not inherit MG-scoped access)
 
 4. Save the output **client secret** (only generated for a **new** `wiv_account` app). Store it in your secret manager; do not commit it.
 

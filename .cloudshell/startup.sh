@@ -8,10 +8,9 @@
 # MicrosoftCustomerAgreement). Customer tenants with no billing account are
 # not supported by this script.
 #
-# Metrics (Monitoring Reader) has no billing-account equivalent, so the only
-# org-level (non per-subscription) way to grant it is at a MANAGEMENT-GROUP
-# scope, which inherits to all subscriptions under the group. That step is
-# optional - press Enter to skip it.
+# Management group (optional): Reader + Monitoring Reader at MG scope inherit
+# to every subscription under the group, including new ones you place there.
+# Skip if you do not need inherited access (per-subscription roles still apply).
 #
 # Requires: az CLI (logged in as a tenant/billing admin), curl, python3
 
@@ -757,38 +756,66 @@ else
 fi
 
 # =====================================================================
-# OPTIONAL: org-level metrics via MANAGEMENT-GROUP scope (not per-sub)
+# OPTIONAL: management group (inherited Reader + Monitoring Reader)
 # =====================================================================
+print_mg_skip_warning() {
+  echo ""
+  echo "   ⚠️  New subscriptions will not inherit Reader and Monitoring Reader access"
+  echo "      from a management group. Per-subscription access on existing billing"
+  echo "      subscriptions is unchanged."
+}
+
 echo ""
-echo "📈 Metrics (Monitoring Reader) - org-level only"
-echo "   Azure Monitor has no billing-account scope. The org-level (non per-sub)"
-echo "   path is a management-group assignment, which inherits to every"
-echo "   subscription under that group."
+echo "📂 Management group (optional)"
+echo "   Assign Reader + Monitoring Reader at a management group so subscriptions"
+echo "   under that group inherit access (including new subscriptions you place there)."
 echo ""
 
 MG_ID=""
 MG_LABEL="(skipped)"
+MG_NAMES=()
+MG_DISPLAYS=()
 
-# List management groups the caller can see.
-echo "   Existing management groups:"
-MG_TABLE=$(az account management-group list --query "[].{Name:name, DisplayName:displayName}" -o table 2>/dev/null)
+while IFS=$'\t' read -r mg_name mg_display; do
+  [ -z "$mg_name" ] && continue
+  MG_NAMES+=("$mg_name")
+  MG_DISPLAYS+=("${mg_display:-$mg_name}")
+done < <(az account management-group list --query "[].{Name:name, DisplayName:displayName}" -o tsv 2>/dev/null)
 
-if [ -n "$MG_TABLE" ] && [ "$(echo "$MG_TABLE" | wc -l)" -gt 2 ]; then
-  echo "$MG_TABLE" | sed 's/^/     /'
+if [ "${#MG_NAMES[@]}" -gt 0 ]; then
+  echo "   Available management groups:"
   echo ""
-  read -p "   Paste a management group Name to use (or Enter to skip metrics): " MG_ID
+  echo "     0) Skip"
+  mg_idx=1
+  for i in "${!MG_NAMES[@]}"; do
+    echo "     $mg_idx) ${MG_NAMES[$i]}  (${MG_DISPLAYS[$i]})"
+    mg_idx=$((mg_idx + 1))
+  done
+  echo ""
+  read -p "   Select a number [0-${#MG_NAMES[@]}] (default 0 = skip): " MG_CHOICE
+  MG_CHOICE="${MG_CHOICE:-0}"
+  if [[ "$MG_CHOICE" =~ ^[0-9]+$ ]] && [ "$MG_CHOICE" -ge 0 ] && [ "$MG_CHOICE" -le "${#MG_NAMES[@]}" ]; then
+    if [ "$MG_CHOICE" -eq 0 ]; then
+      print_mg_skip_warning
+    else
+      MG_ID="${MG_NAMES[$((MG_CHOICE - 1))]}"
+    fi
+  else
+    echo "   ⚠️  Invalid selection; skipping management group."
+    print_mg_skip_warning
+  fi
 else
-  echo "     (none found in this tenant)"
+  echo "   (none found — grant Management Group Reader to list groups, or create one below)"
   echo ""
-  read -p "   No management group exists. Create one now to enable org-level metrics? (y/n): " MK_MG
+  read -p "   Create a management group now? (y/n): " MK_MG
   if [[ "$MK_MG" =~ ^[Yy]$ ]]; then
     read -p "   New management group ID (no spaces, e.g. wiv-finops): " MG_ID
     read -p "   Display name [$MG_ID]: " MG_DISPLAY
     MG_DISPLAY="${MG_DISPLAY:-$MG_ID}"
     echo "   Creating management group '$MG_ID' (under tenant root)..."
     if az account management-group create --name "$MG_ID" --display-name "$MG_DISPLAY" --only-show-errors >/dev/null 2>&1; then
-      echo "   ✅ Created. NOTE: a new MG is empty - Monitoring Reader inherits to"
-      echo "      nothing until subscriptions are moved into it."
+      echo "   ✅ Created. NOTE: a new MG is empty — inherited access applies only after"
+      echo "      subscriptions are moved into it."
       read -p "   Move subscriptions into '$MG_ID' now? (all/specific/no): " MV_CHOICE
       if [[ "$MV_CHOICE" =~ ^[Aa]ll$ ]]; then
         MV_SUBS=$(az account list --query "[].id" -o tsv)
@@ -804,9 +831,12 @@ else
           && echo "       ✅ moved" || echo "       ⚠️  could not move $s (check permissions / already present)"
       done
     else
-      echo "   ⚠️  Could not create management group (needs Microsoft.Management/managementGroups/write). Skipping metrics."
+      echo "   ⚠️  Could not create management group (needs Microsoft.Management/managementGroups/write)."
       MG_ID=""
+      print_mg_skip_warning
     fi
+  else
+    print_mg_skip_warning
   fi
 fi
 
@@ -853,7 +883,7 @@ echo "📄 SP Object ID:     $SP_OBJECT_ID"
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "📄 Cost scope:       billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
 fi
-echo "📄 Metrics scope:    $MG_LABEL"
+echo "📄 Management group: $MG_LABEL"
 if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
   echo ""
   echo "📊 FOCUS billing export (blob):"
