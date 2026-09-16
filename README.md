@@ -10,7 +10,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 |-------|--------|
 | **App registration** | `wiv_account` service principal (client-secret auth for manual installs) |
 | **Billing account roles** | Enrollment Reader (EA) or Billing account reader (MCA / partner) |
-| **Per-subscription ARM roles** | Reader, Monitoring Reader, Cost Management Reader on every subscription under the billing account (`billingSubscriptions` API — not only ARM-visible subs) |
+| **Per-subscription ARM roles** | Reader, Monitoring Reader, Cost Management Reader on every billed subscription (`billingSubscriptions` API). **POC:** you can grant those roles only on subscriptions you pick, and skip the management group. |
 | **FOCUS export** | Daily Parquet/Snappy at billing-account scope → `rg-wiv` storage |
 | **Export identity** | System-assigned managed identity on the export (required when storage has `allowSharedKeyAccess=false`) |
 | **Blob access** | Storage Blob Data Reader on the export storage account for the SP |
@@ -41,7 +41,8 @@ bash .cloudshell/startup.sh
 
 - Pick the **host subscription** (where `rg-wiv` and billing storage live)
 - Paste the **billing account name** from `az billing account list`
-- Optionally select a **management group** from the numbered list (or **Skip** — new subscriptions will not inherit MG-scoped access)
+- Optionally answer **y** to the **POC** prompt to grant Reader / Monitoring Reader only on chosen subscription IDs (skips all-billed ARM roles and the management-group step)
+- Otherwise optionally select a **management group** from the numbered list (or **Skip** — new subscriptions will not inherit MG-scoped access)
 
 4. Save the output **client secret** (only generated for a **new** `wiv_account` app). Store it in your secret manager; do not commit it.
 

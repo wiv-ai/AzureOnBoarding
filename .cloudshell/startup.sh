@@ -12,6 +12,9 @@
 # to every subscription under the group, including new ones you place there.
 # Skip if you do not need inherited access (per-subscription roles still apply).
 #
+# POC: you can instead grant Reader / Monitoring Reader / Cost Management Reader
+# only on subscriptions you pick (no all-billed loop, no management group).
+#
 # Requires: az CLI (logged in as a tenant/billing admin), curl, python3
 
 set -o pipefail
@@ -341,6 +344,29 @@ grant_billing_subscriptions_plane_roles() {
   echo "   ✅ Processed $count subscription(s) from billing account"
 }
 
+# POC: ARM roles only on chosen subscriptions (not every billed sub, no MG inherit).
+parse_subscription_id_list() {
+  echo "$1" | tr ',;' ' ' | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+grant_selected_subscription_plane_roles() {
+  local raw="$1" sub_id count=0
+  raw=$(parse_subscription_id_list "$raw")
+  if [ -z "$raw" ]; then
+    echo "   ⚠️  No subscription IDs given; skipping per-sub ARM roles."
+    return 0
+  fi
+  echo "🔒 POC: assigning Reader / Monitoring Reader / Cost Management Reader on selected subscriptions..."
+  for sub_id in $raw; do
+    sub_id=$(echo "$sub_id" | tr '[:upper:]' '[:lower:]' | sed 's|/subscriptions/||')
+    [ -z "$sub_id" ] && continue
+    echo "   - $sub_id"
+    grant_subscription_plane_roles "$sub_id"
+    count=$((count + 1))
+  done
+  echo "   ✅ Processed $count selected subscription(s)"
+}
+
 ensure_billing_storage_security() {
   local storage_id="$1"
   [ -z "$storage_id" ] && return 0
@@ -531,6 +557,8 @@ STORAGE_ACCOUNT_NAME=""
 CONTAINER_NAME=""
 ROOT_FOLDER=""
 EXPORT_NAME=""
+POC_ARM_ROLES_MODE="n"
+MG_LABEL="(skipped)"
 
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo ""
@@ -581,7 +609,29 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     --role "Cost Management Reader" \
     --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
     --only-show-errors 2>/dev/null || true
-  grant_billing_subscriptions_plane_roles
+
+  echo ""
+  echo "🧪 POC permissions (optional)"
+  echo "   Full onboard grants Reader / Monitoring Reader / Cost Management Reader on"
+  echo "   every billed subscription, then optionally a management group."
+  echo "   POC grants those ARM roles only on subscriptions you pick (no MG inherit)."
+  echo ""
+  read -p "   Apply ARM roles on selected subscription(s) only (POC)? (y/n): " POC_ARM_ROLES
+  if [[ "$POC_ARM_ROLES" =~ ^[Yy]$ ]]; then
+    POC_ARM_ROLES_MODE="y"
+    echo ""
+    echo "   Subscriptions visible to this login:"
+    az account list --query "[].{Name:name, Id:id}" -o table
+    echo ""
+    echo "   Host subscription (already has Cost Management Reader): $APP_SUBSCRIPTION_ID"
+    read -p "   Comma-separated subscription IDs for Reader + Monitoring Reader [$APP_SUBSCRIPTION_ID]: " POC_SUB_IDS
+    POC_SUB_IDS="${POC_SUB_IDS:-$APP_SUBSCRIPTION_ID}"
+    grant_selected_subscription_plane_roles "$POC_SUB_IDS"
+    MG_LABEL="(POC: selected subscriptions only)"
+  else
+    POC_ARM_ROLES_MODE="n"
+    grant_billing_subscriptions_plane_roles
+  fi
 
   EXPORT_SCOPE_BASE="https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}/providers/Microsoft.CostManagement/exports"
   EXISTING_EXPORT_CHECK=""
@@ -765,16 +815,21 @@ print_mg_skip_warning() {
   echo "      subscriptions is unchanged."
 }
 
+MG_ID=""
+MG_NAMES=()
+MG_DISPLAYS=()
+
+if [ "$POC_ARM_ROLES_MODE" = "y" ]; then
+  echo ""
+  echo "📂 Management group skipped (POC selected-subscription ARM roles)."
+  echo "   New subscriptions will not inherit Reader / Monitoring Reader; grant those"
+  echo "   roles on each extra subscription if you expand the POC."
+else
 echo ""
 echo "📂 Management group (optional)"
 echo "   Assign Reader + Monitoring Reader at a management group so subscriptions"
 echo "   under that group inherit access (including new subscriptions you place there)."
 echo ""
-
-MG_ID=""
-MG_LABEL="(skipped)"
-MG_NAMES=()
-MG_DISPLAYS=()
 
 while IFS=$'\t' read -r mg_name mg_display; do
   [ -z "$mg_name" ] && continue
@@ -845,6 +900,7 @@ if [ -n "$MG_ID" ]; then
   assign_role_with_retry "$SP_OBJECT_ID" "Reader" "/providers/Microsoft.Management/managementGroups/${MG_ID}" || true
   assign_role_with_retry "$SP_OBJECT_ID" "Monitoring Reader" "/providers/Microsoft.Management/managementGroups/${MG_ID}" \
     && MG_LABEL="$MG_ID (inherits to all subs under it)"
+fi
 fi
 
 # =====================================================================
