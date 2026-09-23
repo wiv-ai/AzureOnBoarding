@@ -48,13 +48,22 @@ bash .cloudshell/startup.sh
 
 5. In Wiv, create or verify an Azure integration with:
 
+The script prints a ready-to-paste JSON secret at the end, including host `subscription_id`, storage resource ID, container, root folder, and export name. Shape:
+
 ```json
 {
+  "auth_method": "client_secret",
   "tenant_id": "<Azure AD tenant>",
   "app_id": "<from script output>",
   "client_secret": "<from script output>",
+  "sp_object_id": "<from script output>",
   "billing_account_name": "<selected billing account>",
+  "billing_query_backend": "blob",
   "billing_storage_account": "<wivbill… from script>",
+  "billing_storage_resource_id": "<from script output>",
+  "billing_container": "billing-exports",
+  "billing_root_folder": "billing-data",
+  "billing_export_name": "WivFocusDailyExport",
   "subscription_id": "<host subscription>"
 }
 ```

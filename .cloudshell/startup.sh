@@ -933,22 +933,29 @@ fi
 echo ""
 echo "✅ Onboarding Complete (billing-account scope)"
 echo "--------------------------------------"
-echo "📄 Tenant ID:        $TENANT_ID"
-echo "📄 App (Client) ID:  $APP_ID"
-echo "📄 SP Object ID:     $SP_OBJECT_ID"
+echo "📄 Tenant ID:           $TENANT_ID"
+echo "📄 App (Client) ID:     $APP_ID"
+echo "📄 SP Object ID:        $SP_OBJECT_ID"
+echo "📄 Host subscription:   $APP_SUBSCRIPTION_ID"
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
-  echo "📄 Cost scope:       billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
+  echo "📄 Billing account:     $BILLING_ACCOUNT_NAME"
+  echo "📄 Cost scope:          billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
 fi
-echo "📄 Management group: $MG_LABEL"
+echo "📄 Management group:    $MG_LABEL"
 if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
+  if [ -z "${STORAGE_RESOURCE_ID:-}" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ]; then
+    STORAGE_RESOURCE_ID="/subscriptions/${APP_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_NAME}"
+  fi
   echo ""
   echo "📊 FOCUS billing export (blob):"
-  echo "📄 Resource group:   $RESOURCE_GROUP"
-  echo "📄 Storage account:  $STORAGE_ACCOUNT_NAME"
-  echo "📄 Container:        $CONTAINER_NAME"
-  echo "📄 Export name:      $EXPORT_NAME (FOCUS, Parquet/Snappy, daily, billing-account scope)"
-  echo "📄 Export path:      $ROOT_FOLDER/${EXPORT_NAME}/"
-  echo "📄 Billing query:    direct blob (matches Wiv product onboarding)"
+  echo "📄 Resource group:      $RESOURCE_GROUP"
+  echo "📄 Storage account:     $STORAGE_ACCOUNT_NAME"
+  echo "📄 Storage resource ID: ${STORAGE_RESOURCE_ID:-}"
+  echo "📄 Container:           $CONTAINER_NAME"
+  echo "📄 Root folder:         $ROOT_FOLDER"
+  echo "📄 Export name:         $EXPORT_NAME (FOCUS, Parquet/Snappy, daily, billing-account scope)"
+  echo "📄 Export path:         $ROOT_FOLDER/${EXPORT_NAME}/"
+  echo "📄 Billing query:       direct blob (matches Wiv product onboarding)"
 fi
 
 echo ""
@@ -958,4 +965,45 @@ if [ -n "$CLIENT_SECRET" ]; then
 else
   echo "🔐 CLIENT SECRET: not regenerated (existing service principal)."
   echo "    Reuse the secret saved during the first onboarding."
+  CLIENT_SECRET="<reuse-existing-client-secret>"
+fi
+
+# Ready-to-paste Wiv integration secret (client_secret path; no Synapse).
+echo ""
+echo "📦 Wiv integration secret (paste into manual Azure integration / share with Wiv):"
+if [ "$BILLING_EXPORT_DEPLOYED" = "y" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ]; then
+  cat <<EOF
+{
+  "auth_method": "client_secret",
+  "tenant_id": "${TENANT_ID}",
+  "app_id": "${APP_ID}",
+  "client_secret": "${CLIENT_SECRET}",
+  "sp_object_id": "${SP_OBJECT_ID}",
+  "billing_account_name": "${BILLING_ACCOUNT_NAME}",
+  "billing_query_backend": "blob",
+  "billing_storage_account": "${STORAGE_ACCOUNT_NAME}",
+  "billing_storage_resource_id": "${STORAGE_RESOURCE_ID}",
+  "billing_container": "${CONTAINER_NAME}",
+  "billing_root_folder": "${ROOT_FOLDER}",
+  "billing_export_name": "${EXPORT_NAME}",
+  "subscription_id": "${APP_SUBSCRIPTION_ID}"
+}
+EOF
+else
+  cat <<EOF
+{
+  "auth_method": "client_secret",
+  "tenant_id": "${TENANT_ID}",
+  "app_id": "${APP_ID}",
+  "client_secret": "${CLIENT_SECRET}",
+  "sp_object_id": "${SP_OBJECT_ID}",
+  "billing_account_name": "${BILLING_ACCOUNT_NAME}",
+  "billing_query_backend": "blob",
+  "subscription_id": "${APP_SUBSCRIPTION_ID}"
+}
+EOF
+  echo "   (billing storage / export fields omitted — FOCUS export was not deployed in this run)"
+fi
+if [ "$CLIENT_SECRET" = "<reuse-existing-client-secret>" ]; then
+  echo "   Replace client_secret with the value saved from the first onboarding."
 fi
