@@ -80,24 +80,22 @@ done
 echo "   SP Object ID: $SP_OBJECT_ID"
 
 # --- Client secret ---
-# Only mint a secret for a brand-new SP. Resetting an existing SP's secret would
-# invalidate the secret already stored in the Wiv integration, breaking it.
+# Azure never returns an existing secret. Always mint a new one (--append so prior
+# secrets keep working) so the final JSON can include a real printable value.
 echo ""
+if date --version >/dev/null 2>&1; then
+  END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
+else
+  END_DATE=$(date -v +2y +"%Y-%m-%d")
+fi
 if [ "$SP_IS_NEW" = "y" ]; then
   echo "🔑 Creating client secret (2y expiry)..."
-  if date --version >/dev/null 2>&1; then
-    END_DATE=$(date -d "+2 years" +"%Y-%m-%d")
-  else
-    END_DATE=$(date -v +2y +"%Y-%m-%d")
-  fi
-  CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --end-date "$END_DATE" --query password -o tsv)
-  [ -z "$CLIENT_SECRET" ] && { echo "❌ Failed to create client secret."; exit 1; }
 else
-  echo "🔑 Service principal already exists - keeping its existing client secret (not resetting)."
-  echo "   Reuse the secret you saved during the first onboarding."
-  echo "   If you lost it, re-create one with: az ad app credential reset --id $APP_ID"
-  CLIENT_SECRET=""
+  echo "🔑 Creating a new client secret (2y expiry) for the existing app..."
+  echo "   Prior secrets stay valid (--append). Use the new value printed at the end."
 fi
+CLIENT_SECRET=$(az ad app credential reset --id "$APP_ID" --append --end-date "$END_DATE" --query password -o tsv)
+[ -z "$CLIENT_SECRET" ] && { echo "❌ Failed to create client secret."; exit 1; }
 
 # =====================================================================
 # PRIMARY: billing-account cost path (EA / MCA / CSP partner)
@@ -230,12 +228,6 @@ else
 fi
 
 # --- Smoke test: query cost AS THE SP at billing-account scope ---
-if [ "$RUN_SMOKE" = "y" ] && [ -z "$CLIENT_SECRET" ]; then
-  echo ""
-  echo "ℹ️  Skipping SP smoke test - no new secret was generated for the existing SP."
-  echo "   (The smoke test needs a client secret to acquire an SP token.)"
-  RUN_SMOKE="n"
-fi
 if [ "$RUN_SMOKE" = "y" ]; then
   echo ""
   read -p "↪️  Press Enter to run the smoke test (allow a few min if the grant was just made)... " _
@@ -959,14 +951,8 @@ if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
 fi
 
 echo ""
-if [ -n "$CLIENT_SECRET" ]; then
-  echo "🔐 CLIENT SECRET (sensitive - store in your secret manager, do not commit):"
-  echo "    $CLIENT_SECRET"
-else
-  echo "🔐 CLIENT SECRET: not regenerated (existing service principal)."
-  echo "    Reuse the secret saved during the first onboarding."
-  CLIENT_SECRET="<reuse-existing-client-secret>"
-fi
+echo "🔐 CLIENT SECRET (sensitive - store in your secret manager, do not commit):"
+echo "    $CLIENT_SECRET"
 
 # Ready-to-paste Wiv integration secret (client_secret path; no Synapse).
 echo ""
@@ -1003,7 +989,4 @@ else
 }
 EOF
   echo "   (billing storage / export fields omitted — FOCUS export was not deployed in this run)"
-fi
-if [ "$CLIENT_SECRET" = "<reuse-existing-client-secret>" ]; then
-  echo "   Replace client_secret with the value saved from the first onboarding."
 fi

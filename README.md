@@ -44,7 +44,7 @@ bash .cloudshell/startup.sh
 - Optionally answer **y** to the **POC** prompt to grant Reader / Monitoring Reader only on chosen subscription IDs (skips all-billed ARM roles and the management-group step)
 - Otherwise optionally select a **management group** from the numbered list (or **Skip** — new subscriptions will not inherit MG-scoped access)
 
-4. Save the output **client secret** (only generated for a **new** `wiv_account` app). Store it in your secret manager; do not commit it.
+4. Save the output **client secret** (always minted each run, including re-runs of an existing `wiv_account` — prior secrets stay valid). Store it in your secret manager; do not commit it.
 
 5. In Wiv, create or verify an Azure integration with:
 
