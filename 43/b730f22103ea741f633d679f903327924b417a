@@ -1,0 +1,27 @@
+.cloudshell/startup.sh
+  s_914b595a830093::t_883fa8b9821bde 308-310
+  s_914b595a830093::t_683020a78a275c 622-624
+README.md
+  s_914b595a830093::t_743815f91026ef 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "43b730f22103ea741f633d679f903327924b417a",
+  "prompts": {},
+  "humans": {
+    "h_701710ebe0bafa": {
+      "author": "Dotan Cohen <dotan@wiv.ai>"
+    }
+  },
+  "sessions": {
+    "s_914b595a830093": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "1e840b2b-036b-498f-a57f-4e7da1b6406d",
+        "model": "auto-smart"
+      },
+      "human_author": "Dotan Cohen <dotan@wiv.ai>"
+    }
+  }
+}
