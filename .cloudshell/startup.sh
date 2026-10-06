@@ -305,9 +305,9 @@ grant_reservations_reader() {
     echo "   ✅ Reservations Reader at tenant root /"
     return 0
   fi
-  echo "   ⚠️  Could not assign Reservations Reader at / (needs User Access Administrator at tenant root)."
-  echo "      Continue without reservation-order APIs, or assign the role later:"
-  echo "        az role assignment create --assignee-object-id $SP_OBJECT_ID --assignee-principal-type ServicePrincipal --role 'Reservations Reader' --scope /"
+  echo "   ❌ Could not assign Reservations Reader at /."
+  echo "      Enable Access management for Azure resources (User Access Administrator at tenant root),"
+  echo "      then re-run this onboarding script. Do not assign the role by hand."
   return 1
 }
 
@@ -619,7 +619,9 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
     --only-show-errors 2>/dev/null || true
 
-  grant_reservations_reader || true
+  if ! grant_reservations_reader; then
+    exit 1
+  fi
 
   echo ""
   echo "🧪 POC permissions (optional)"
