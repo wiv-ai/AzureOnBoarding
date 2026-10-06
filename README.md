@@ -11,7 +11,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 | **App registration** | `wiv_account` service principal (client-secret auth for manual installs) |
 | **Billing account roles** | Enrollment Reader (EA) or Billing account reader (MCA / partner) |
 | **Per-subscription ARM roles** | Reader, Monitoring Reader, Cost Management Reader on every billed subscription (`billingSubscriptions` API). **POC:** you can grant those roles only on subscriptions you pick, and skip the management group. |
-| **Reservations Reader** | Built-in role at tenant root `/` so Wiv can read reservation orders. Not a per-subscription role; still granted in POC. Requires **User Access Administrator** at `/` (Global Admin / subscription Owner is not enough; [elevate access](https://learn.microsoft.com/azure/role-based-access-control/elevate-access-global-admin) first). Onboarding fails if the operator cannot write at `/`. |
+| **Reservations Reader** | Built-in role at `/providers/Microsoft.Capacity` so Wiv can read reservation orders. Not a per-subscription role; still granted in POC. Requires **User Access Administrator** at tenant level (Global Admin / subscription Owner is not enough; [elevate access](https://learn.microsoft.com/azure/role-based-access-control/elevate-access-global-admin) first). Onboarding fails if that assignment is denied. |
 | **FOCUS export** | Daily Parquet/Snappy at billing-account scope → `rg-wiv` storage |
 | **Export identity** | System-assigned managed identity on the export (required when storage has `allowSharedKeyAccess=false`) |
 | **Blob access** | Storage Blob Data Reader on the export storage account for the SP |
@@ -21,7 +21,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 
 - Azure CLI (`az`), `curl`, `python3`
 - Logged in as a tenant/billing admin with rights to create app registrations, billing exports, and role assignments
-- **User Access Administrator** at tenant root `/` to grant Reservations Reader (Entra **Global Administrator** alone does not write Azure RBAC at `/`)
+- **User Access Administrator** at tenant level to grant Reservations Reader at `/providers/Microsoft.Capacity` (Entra **Global Administrator** alone is not enough)
 - A billing account visible to the login (EA, MCA, or CSP partner MCA)
 
 ## Quick start (Cloud Shell)

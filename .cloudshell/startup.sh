@@ -12,7 +12,7 @@
 # to every subscription under the group, including new ones you place there.
 # Skip if you do not need inherited access (per-subscription roles still apply).
 #
-# Reservations Reader is assigned once at tenant root /.
+# Reservations Reader is assigned once at /providers/Microsoft.Capacity.
 # Reservation orders are not per-subscription; POC still gets this.
 #
 # POC: you can instead grant Reader / Monitoring Reader / Cost Management Reader
@@ -298,15 +298,15 @@ assign_role_with_retry() {
 }
 
 grant_reservations_reader() {
-  echo "🔒 Assigning Reservations Reader at tenant root /"
+  echo "🔒 Assigning Reservations Reader at /providers/Microsoft.Capacity"
   echo "   (list-all reservation APIs check Microsoft.Capacity/reservationOrders/reservations/read"
-  echo "    over /providers/Microsoft.Capacity; Azure requires the role at /)..."
-  if assign_role_with_retry "$SP_OBJECT_ID" "Reservations Reader" "/"; then
-    echo "   ✅ Reservations Reader at tenant root /"
+  echo "    over /providers/Microsoft.Capacity; Microsoft assigns the role at that scope)..."
+  if assign_role_with_retry "$SP_OBJECT_ID" "Reservations Reader" "/providers/Microsoft.Capacity"; then
+    echo "   ✅ Reservations Reader at /providers/Microsoft.Capacity"
     return 0
   fi
-  echo "   ❌ Could not assign Reservations Reader at /."
-  echo "      Enable Access management for Azure resources (User Access Administrator at tenant root),"
+  echo "   ❌ Could not assign Reservations Reader at /providers/Microsoft.Capacity."
+  echo "      Enable Access management for Azure resources (User Access Administrator at tenant level),"
   echo "      then re-run this onboarding script. Do not assign the role by hand."
   return 1
 }
@@ -627,7 +627,7 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "🧪 POC permissions (optional)"
   echo "   Full onboard grants Reader / Monitoring Reader / Cost Management Reader on"
   echo "   every billed subscription, then optionally a management group."
-  echo "   Reservations Reader is always attempted at tenant root / (POC included)."
+  echo "   Reservations Reader is always attempted at /providers/Microsoft.Capacity (POC included)."
   echo "   POC grants those ARM roles only on subscriptions you pick (no MG inherit)."
   echo ""
   read -p "   Apply ARM roles on selected subscription(s) only (POC)? (y/n): " POC_ARM_ROLES
