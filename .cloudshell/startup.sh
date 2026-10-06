@@ -12,6 +12,9 @@
 # to every subscription under the group, including new ones you place there.
 # Skip if you do not need inherited access (per-subscription roles still apply).
 #
+# Reservations Reader is assigned once at /providers/Microsoft.Capacity (fallback
+# tenant root /). Reservation orders are not per-subscription; POC still gets this.
+#
 # POC: you can instead grant Reader / Monitoring Reader / Cost Management Reader
 # only on subscriptions you pick (no all-billed loop, no management group).
 #
@@ -292,6 +295,24 @@ assign_role_with_retry() {
     fi
     echo "    ⚠️  '$role' at $scope failed: $out"; return 1
   done
+}
+
+grant_reservations_reader() {
+  echo "🔒 Assigning Reservations Reader at tenant/Capacity scope"
+  echo "   (reservation orders are not per-subscription; includes Microsoft.Capacity/reservationOrders/reservations/read)..."
+  if assign_role_with_retry "$SP_OBJECT_ID" "Reservations Reader" "/providers/Microsoft.Capacity"; then
+    echo "   ✅ Reservations Reader at /providers/Microsoft.Capacity"
+    return 0
+  fi
+  echo "   ⚠️  Capacity-provider assignment failed; trying tenant root / ..."
+  if assign_role_with_retry "$SP_OBJECT_ID" "Reservations Reader" "/"; then
+    echo "   ✅ Reservations Reader at tenant root /"
+    return 0
+  fi
+  echo "   ⚠️  Could not assign Reservations Reader (needs User Access Administrator at tenant root)."
+  echo "      Continue without reservation-order APIs, or assign the role later:"
+  echo "        az role assignment create --assignee-object-id $SP_OBJECT_ID --assignee-principal-type ServicePrincipal --role 'Reservations Reader' --scope /providers/Microsoft.Capacity"
+  return 1
 }
 
 list_billing_account_subscription_ids() {
@@ -602,10 +623,13 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
     --only-show-errors 2>/dev/null || true
 
+  grant_reservations_reader || true
+
   echo ""
   echo "🧪 POC permissions (optional)"
   echo "   Full onboard grants Reader / Monitoring Reader / Cost Management Reader on"
   echo "   every billed subscription, then optionally a management group."
+  echo "   Reservations Reader is always attempted at tenant/Capacity scope (POC included)."
   echo "   POC grants those ARM roles only on subscriptions you pick (no MG inherit)."
   echo ""
   read -p "   Apply ARM roles on selected subscription(s) only (POC)? (y/n): " POC_ARM_ROLES

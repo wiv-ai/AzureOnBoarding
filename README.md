@@ -11,6 +11,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 | **App registration** | `wiv_account` service principal (client-secret auth for manual installs) |
 | **Billing account roles** | Enrollment Reader (EA) or Billing account reader (MCA / partner) |
 | **Per-subscription ARM roles** | Reader, Monitoring Reader, Cost Management Reader on every billed subscription (`billingSubscriptions` API). **POC:** you can grant those roles only on subscriptions you pick, and skip the management group. |
+| **Reservations Reader** | Built-in role at `/providers/Microsoft.Capacity` (fallback tenant root `/`) so Wiv can read reservation orders. Not a per-subscription role; still granted in POC. |
 | **FOCUS export** | Daily Parquet/Snappy at billing-account scope → `rg-wiv` storage |
 | **Export identity** | System-assigned managed identity on the export (required when storage has `allowSharedKeyAccess=false`) |
 | **Blob access** | Storage Blob Data Reader on the export storage account for the SP |
