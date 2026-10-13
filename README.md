@@ -106,12 +106,6 @@ Safe to re-run. The script:
 | Generate Integration Link | `federated_workload` | Yes |
 | This Cloud Shell script | `client_secret` | Same resources; manual steps |
 
-Backend docs (in `wiv-ai/backend`):
-
-- `wf_operations/src/integrations/azure/AZURE_KEYLESS_INSTALLATION_API.md`
-- `wf_operations/src/integrations/azure/AZURE_ONBOARD_LINK_API.md`
-- `wf_operations/src/integrations/azure/AZURE_PLATFORM_HANDOFF.md`
-
 ## Legacy Synapse scripts (deprecated)
 
 These are **not** used for new Wiv integrations:
