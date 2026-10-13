@@ -556,6 +556,68 @@ EOF
 # (one RunID per month folder). Nested overwriteMode on the preview API does
 # not delete previous daily run folders.
 COST_EXPORT_API_VERSION="2025-03-01"
+FOCUS_EXPORT_BACKFILL_MONTHS=12
+
+# Queue Custom /run for each of the prior N completed calendar months, then the
+# caller triggers an empty MonthToDate run for the current month. Azure accepts
+# at most one calendar month per Execute call; 429s are retried.
+trigger_focus_export_backfill() {
+  local export_scope_base="$1"
+  local export_name="$2"
+  local months="${3:-$FOCUS_EXPORT_BACKFILL_MONTHS}"
+  local periods period_from period_to body attempt max_attempts=5 rest_out
+
+  echo "🔄 Backfilling FOCUS export for prior ${months} month(s)..."
+  periods=$(python3 - "$months" <<'PY'
+import calendar
+import sys
+from datetime import datetime, timezone
+
+months = int(sys.argv[1])
+if months <= 0:
+    raise SystemExit(0)
+anchor = datetime.now(timezone.utc)
+year, month = anchor.year, anchor.month - months
+while month <= 0:
+    month += 12
+    year -= 1
+for _ in range(months):
+    last_day = calendar.monthrange(year, month)[1]
+    print(f"{year:04d}-{month:02d}-01T00:00:00Z {year:04d}-{month:02d}-{last_day:02d}T00:00:00Z")
+    month += 1
+    if month > 12:
+        month = 1
+        year += 1
+PY
+)
+
+  while IFS=' ' read -r period_from period_to; do
+    [ -z "$period_from" ] && continue
+    body=$(cat <<EOF
+{"timeFrame":"Custom","timePeriod":{"from":"${period_from}","to":"${period_to}"}}
+EOF
+)
+    for attempt in $(seq 1 "$max_attempts"); do
+      if rest_out=$(az rest --method POST \
+        --uri "${export_scope_base}/${export_name}/run?api-version=${COST_EXPORT_API_VERSION}" \
+        --body "$body" \
+        --headers "Content-Type=application/json" \
+        -o none 2>&1); then
+        echo "   ✅ Queued ${period_from:0:7}"
+        break
+      fi
+      if echo "$rest_out" | grep -qiE '429|TooManyRequests|throttl|Retry-After'; then
+        if [ "$attempt" -lt "$max_attempts" ]; then
+          echo "   ⏳ ${period_from:0:7} throttled — retry ${attempt}/${max_attempts} in 60s..."
+          sleep 60
+          continue
+        fi
+      fi
+      echo "   ⚠️  Could not queue backfill for ${period_from:0:7} (continuing)"
+      break
+    done
+  done <<< "$periods"
+}
 
 # =====================================================================
 # FOCUS billing export at billing-account scope (direct blob)
@@ -779,7 +841,8 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
       if echo "$EXPORT_RESPONSE" | grep -qiE '"name"|"id"'; then
         BILLING_EXPORT_DEPLOYED="y"
         echo "   ✅ FOCUS billing export created at billing-account scope (covers all subscriptions)"
-        echo "🔄 Triggering immediate export run..."
+        trigger_focus_export_backfill "$EXPORT_SCOPE_BASE" "$EXPORT_NAME" "$FOCUS_EXPORT_BACKFILL_MONTHS"
+        echo "🔄 Triggering immediate MonthToDate export run..."
         az rest --method POST \
           --uri "${EXPORT_SCOPE_BASE}/${EXPORT_NAME}/run?api-version=${COST_EXPORT_API_VERSION}" \
           --output none 2>/dev/null || echo "   Note: immediate run may not be available yet"
