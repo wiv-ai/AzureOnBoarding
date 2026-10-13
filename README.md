@@ -2,8 +2,6 @@
 
 Manual / Cloud Shell onboarding for Azure cost integrations. Provisions the same **direct blob** billing path as Wiv product onboarding (Generate Integration Link and in-app keyless installer).
 
-Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo for older integrations only.
-
 ## What the script sets up
 
 | Piece | Detail |
