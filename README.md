@@ -106,19 +106,6 @@ Safe to re-run. The script:
 | Generate Integration Link | `federated_workload` | Yes |
 | This Cloud Shell script | `client_secret` | Same resources; manual steps |
 
-## Legacy Synapse scripts (deprecated)
-
-These are **not** used for new Wiv integrations:
-
-| File | Notes |
-|------|--------|
-| `startup_with_billing_synapse.sh` | Old all-in-one Synapse + export setup |
-| `csp_billing_synapse_setup.sh` | CSP-focused Synapse variant |
-| `synapse_remote_query_client.py` | Query helper for legacy Synapse workspaces |
-| `diagnose_synapse_auth.py` | Synapse auth diagnostics |
-
-Existing integrations that still have `workspace_name` in the secret can use Synapse as a runtime fallback until migrated to blob-only.
-
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
