@@ -10,8 +10,8 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 |-------|--------|
 | **App registration** | `wiv_account` service principal (client-secret auth for manual installs) |
 | **Billing account roles** | Enrollment Reader (EA) or Billing account reader (MCA / partner) |
-| **Per-subscription ARM roles** | Reader, Monitoring Reader, Cost Management Reader on every billed subscription (`billingSubscriptions` API). **POC:** you can grant those roles only on subscriptions you pick, and skip the management group. |
-| **Reservations Reader** | Built-in role at `/providers/Microsoft.Capacity` so Wiv can read reservation orders. Not a per-subscription role; still granted in POC. Requires **User Access Administrator** at tenant level (Global Admin / subscription Owner is not enough; [elevate access](https://learn.microsoft.com/azure/role-based-access-control/elevate-access-global-admin) first). Onboarding fails if that assignment is denied. |
+| **Per-subscription ARM roles** | Reader, Monitoring Reader, Cost Management Reader on every billed subscription (`billingSubscriptions` API). **POC:** you can grant those roles only on subscriptions you pick, and skip the management group. **MSP / CSP partner:** answer **y** to *billing export only* to skip these entirely (customer subscriptions are in customer tenants and not reachable from the partner login). |
+| **Reservations Reader** | Built-in role at `/providers/Microsoft.Capacity` so Wiv can read reservation orders. Not a per-subscription role; still granted in POC, skipped in MSP billing-export-only mode. Requires **User Access Administrator** at tenant level (Global Admin / subscription Owner is not enough; [elevate access](https://learn.microsoft.com/azure/role-based-access-control/elevate-access-global-admin) first). Onboarding fails if that assignment is denied. |
 | **FOCUS export** | Daily Parquet/Snappy at billing-account scope → `rg-wiv` storage; seeds prior **12 months** via Custom `/run` plus MonthToDate |
 | **Export identity** | System-assigned managed identity on the export (required when storage has `allowSharedKeyAccess=false`) |
 | **Blob access** | Storage Blob Data Reader on the export storage account for the SP |
@@ -43,6 +43,7 @@ bash .cloudshell/startup.sh
 
 - Pick the **host subscription** (where `rg-wiv` and billing storage live)
 - Paste the **billing account name** from `az billing account list`
+- **MSP / CSP partner:** answer **y** to the **billing export only** prompt (default **y** when the billing account is a `MicrosoftPartnerAgreement`). This skips Reservations Reader, per-subscription ARM roles and the management group; only the billing-account roles and the FOCUS export are set up
 - Optionally answer **y** to the **POC** prompt to grant Reader / Monitoring Reader only on chosen subscription IDs (skips all-billed ARM roles and the management-group step)
 - Otherwise optionally select a **management group** from the numbered list (or **Skip** — new subscriptions will not inherit MG-scoped access)
 

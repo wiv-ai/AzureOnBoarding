@@ -18,6 +18,11 @@
 # POC: you can instead grant Reader / Monitoring Reader / Cost Management Reader
 # only on subscriptions you pick (no all-billed loop, no management group).
 #
+# MSP / CSP partner: customer subscriptions live in customer tenants, so the
+# partner login cannot grant ARM roles on them. Answer y to "billing export
+# only" to skip per-subscription roles, Reservations Reader and the management
+# group; billing-account roles + the FOCUS export are still set up.
+#
 # Requires: az CLI (logged in as a tenant/billing admin), curl, python3
 
 set -o pipefail
@@ -629,6 +634,7 @@ CONTAINER_NAME=""
 ROOT_FOLDER=""
 EXPORT_NAME=""
 POC_ARM_ROLES_MODE="n"
+MSP_BILLING_ONLY="n"
 MG_LABEL="(skipped)"
 
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
@@ -681,32 +687,54 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
     --only-show-errors 2>/dev/null || true
 
-  if ! grant_reservations_reader; then
-    exit 1
-  fi
-
   echo ""
-  echo "🧪 POC permissions (optional)"
-  echo "   Full onboard grants Reader / Monitoring Reader / Cost Management Reader on"
-  echo "   every billed subscription, then optionally a management group."
-  echo "   Reservations Reader is always attempted at /providers/Microsoft.Capacity (POC included)."
-  echo "   POC grants those ARM roles only on subscriptions you pick (no MG inherit)."
+  echo "🏢 MSP / CSP partner mode (optional)"
+  echo "   Customer subscriptions billed through a partner account live in the customers'"
+  echo "   tenants, so per-subscription ARM roles, Reservations Reader and management-group"
+  echo "   access cannot be granted from the partner login. Billing-export-only mode skips"
+  echo "   those and keeps the billing-account roles + FOCUS export (all customers' cost)."
   echo ""
-  read -p "   Apply ARM roles on selected subscription(s) only (POC)? (y/n): " POC_ARM_ROLES
-  if [[ "$POC_ARM_ROLES" =~ ^[Yy]$ ]]; then
-    POC_ARM_ROLES_MODE="y"
-    echo ""
-    echo "   Subscriptions visible to this login:"
-    az account list --query "[].{Name:name, Id:id}" -o table
-    echo ""
-    echo "   Host subscription (already has Cost Management Reader): $APP_SUBSCRIPTION_ID"
-    read -p "   Comma-separated subscription IDs for Reader + Monitoring Reader [$APP_SUBSCRIPTION_ID]: " POC_SUB_IDS
-    POC_SUB_IDS="${POC_SUB_IDS:-$APP_SUBSCRIPTION_ID}"
-    grant_selected_subscription_plane_roles "$POC_SUB_IDS"
-    MG_LABEL="(POC: selected subscriptions only)"
+  if [ "$AGREEMENT" = "MicrosoftPartnerAgreement" ]; then
+    MSP_DEFAULT="y"
   else
-    POC_ARM_ROLES_MODE="n"
-    grant_billing_subscriptions_plane_roles
+    MSP_DEFAULT="n"
+  fi
+  read -p "   Billing export only — skip subscription/ARM permissions (MSP)? (y/n) [$MSP_DEFAULT]: " MSP_BILLING_ONLY
+  MSP_BILLING_ONLY="${MSP_BILLING_ONLY:-$MSP_DEFAULT}"
+  if [[ "$MSP_BILLING_ONLY" =~ ^[Yy]$ ]]; then
+    MSP_BILLING_ONLY="y"
+    MG_LABEL="(skipped: MSP billing-export-only)"
+    echo "   ⏭️  Skipping Reservations Reader, per-subscription ARM roles and management group."
+  else
+    MSP_BILLING_ONLY="n"
+
+    if ! grant_reservations_reader; then
+      exit 1
+    fi
+
+    echo ""
+    echo "🧪 POC permissions (optional)"
+    echo "   Full onboard grants Reader / Monitoring Reader / Cost Management Reader on"
+    echo "   every billed subscription, then optionally a management group."
+    echo "   Reservations Reader is always attempted at /providers/Microsoft.Capacity (POC included)."
+    echo "   POC grants those ARM roles only on subscriptions you pick (no MG inherit)."
+    echo ""
+    read -p "   Apply ARM roles on selected subscription(s) only (POC)? (y/n): " POC_ARM_ROLES
+    if [[ "$POC_ARM_ROLES" =~ ^[Yy]$ ]]; then
+      POC_ARM_ROLES_MODE="y"
+      echo ""
+      echo "   Subscriptions visible to this login:"
+      az account list --query "[].{Name:name, Id:id}" -o table
+      echo ""
+      echo "   Host subscription (already has Cost Management Reader): $APP_SUBSCRIPTION_ID"
+      read -p "   Comma-separated subscription IDs for Reader + Monitoring Reader [$APP_SUBSCRIPTION_ID]: " POC_SUB_IDS
+      POC_SUB_IDS="${POC_SUB_IDS:-$APP_SUBSCRIPTION_ID}"
+      grant_selected_subscription_plane_roles "$POC_SUB_IDS"
+      MG_LABEL="(POC: selected subscriptions only)"
+    else
+      POC_ARM_ROLES_MODE="n"
+      grant_billing_subscriptions_plane_roles
+    fi
   fi
 
   EXPORT_SCOPE_BASE="https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}/providers/Microsoft.CostManagement/exports"
@@ -896,7 +924,11 @@ MG_ID=""
 MG_NAMES=()
 MG_DISPLAYS=()
 
-if [ "$POC_ARM_ROLES_MODE" = "y" ]; then
+if [ "$MSP_BILLING_ONLY" = "y" ]; then
+  echo ""
+  echo "📂 Management group skipped (MSP billing-export-only mode)."
+  echo "   Customer subscriptions are in other tenants; cost comes from the FOCUS export."
+elif [ "$POC_ARM_ROLES_MODE" = "y" ]; then
   echo ""
   echo "📂 Management group skipped (POC selected-subscription ARM roles)."
   echo "   New subscriptions will not inherit Reader / Monitoring Reader; grant those"
@@ -1019,6 +1051,9 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "📄 Cost scope:          billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
 fi
 echo "📄 Management group:    $MG_LABEL"
+if [ "$MSP_BILLING_ONLY" = "y" ]; then
+  echo "📄 ARM roles:           skipped (MSP billing-export-only: no per-subscription roles, no Reservations Reader)"
+fi
 if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
   if [ -z "${STORAGE_RESOURCE_ID:-}" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ]; then
     STORAGE_RESOURCE_ID="/subscriptions/${APP_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_NAME}"
