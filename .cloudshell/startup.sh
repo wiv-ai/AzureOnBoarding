@@ -298,6 +298,12 @@ assign_role_with_retry() {
       [ "$tries" -ge "$max" ] && { echo "    ⚠️  '$role' not assigned after $max tries (replication)."; return 1; }
       sleep 15; continue
     fi
+    if echo "$out" | grep -qi "InvalidAuthenticationTokenTenant"; then
+      echo "    ⚠️  '$role' at $scope skipped: subscription belongs to another tenant (customer tenant); not reachable from this login."; return 1
+    fi
+    if echo "$out" | grep -qi "SubscriptionNotFound"; then
+      echo "    ⚠️  '$role' at $scope skipped: subscription not found in this tenant (deleted, disabled or moved)."; return 1
+    fi
     echo "    ⚠️  '$role' at $scope failed: $out"; return 1
   done
 }
@@ -317,20 +323,48 @@ grant_reservations_reader() {
 }
 
 list_billing_account_subscription_ids() {
-  local url
+  local url resp page=0 ids=""
   url="https://management.azure.com/providers/Microsoft.Billing/billingAccounts/${BILLING_ACCOUNT_NAME}/billingSubscriptions?api-version=${BILLING_API_VERSION}"
-  az rest --method GET --url "$url" 2>/dev/null | python3 -c "
+  while [ -n "$url" ] && [ "$page" -lt 100 ]; do
+    resp=$(az rest --method GET --url "$url" 2>/dev/null) || break
+    ids="$ids $(printf '%s' "$resp" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-ids = []
 for item in data.get('value') or []:
     props = item.get('properties') or {}
-    sid = props.get('subscriptionId') or item.get('name') or ''
+    sid = (props.get('subscriptionId') or item.get('name') or '')
     sid = sid.replace('/subscriptions/', '').split('/')[0].strip().lower()
     if sid:
-        ids.append(sid)
-print(' '.join(ids))
-" 2>/dev/null
+        print(sid)
+" 2>/dev/null)"
+    url=$(printf '%s' "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('nextLink') or '')" 2>/dev/null)
+    page=$((page + 1))
+  done
+  echo "$ids"
+}
+
+# One cheap GET classifies a billed subscription before any role assignment:
+#   local            - lives in the signed-in tenant; roles can be granted
+#   foreign <tenant> - owned by another tenant (CSP customer / transferred sub)
+#   missing          - billing account still lists it but ARM cannot resolve it
+classify_subscription_tenant() {
+  local sub_id="$1" out tid
+  if out=$(az rest --method GET \
+      --url "https://management.azure.com/subscriptions/${sub_id}?api-version=2022-12-01" 2>&1); then
+    echo "local"
+    return
+  fi
+  if echo "$out" | grep -q "InvalidAuthenticationTokenTenant"; then
+    tid=$(echo "$out" | grep -oE "must match the tenant 'https://sts.windows.net/[0-9a-f-]{36}" \
+      | grep -oE '[0-9a-f-]{36}' | head -1)
+    echo "foreign ${tid:-unknown}"
+    return
+  fi
+  if echo "$out" | grep -q "SubscriptionNotFound"; then
+    echo "missing"
+    return
+  fi
+  echo "unknown"
 }
 
 grant_subscription_plane_roles() {
@@ -343,7 +377,7 @@ grant_subscription_plane_roles() {
 }
 
 grant_billing_subscriptions_plane_roles() {
-  local sub_ids sub_id count=0
+  local sub_ids sub_id cls granted=0 missing=0 foreign_list=""
   sub_ids=$(list_billing_account_subscription_ids)
   if [ -z "$sub_ids" ]; then
     echo "   ⚠️  No subscriptions returned from billingSubscriptions API; per-sub ARM roles skipped."
@@ -351,11 +385,30 @@ grant_billing_subscriptions_plane_roles() {
   fi
   echo "🔒 Assigning Reader / Monitoring Reader / Cost Management Reader on billed subscriptions..."
   for sub_id in $sub_ids; do
-    echo "   - $sub_id"
-    grant_subscription_plane_roles "$sub_id"
-    count=$((count + 1))
+    cls=$(classify_subscription_tenant "$sub_id")
+    case "$cls" in
+      foreign*)
+        foreign_list="$foreign_list ${cls#foreign }:$sub_id" ;;
+      missing)
+        missing=$((missing + 1)) ;;
+      *)
+        echo "   - $sub_id"
+        grant_subscription_plane_roles "$sub_id"
+        granted=$((granted + 1)) ;;
+    esac
   done
-  echo "   ✅ Processed $count subscription(s) from billing account"
+  echo "   ✅ Granted ARM roles on $granted subscription(s) in this tenant"
+  if [ -n "$foreign_list" ]; then
+    echo "   ℹ️  Skipped subscriptions billed by this account but owned by other tenants."
+    echo "      Their cost is still included in the billing-account FOCUS export. Granting ARM"
+    echo "      roles on them (inventory, metrics, reservations) needs a sign-in to that tenant"
+    echo "      or Azure Lighthouse delegation:"
+    printf '%s\n' $foreign_list | awk -F: '{c[$1]++} END {for (t in c) printf "      - tenant %s: %d subscription(s) — az login --tenant %s\n", t, c[t], t}'
+  fi
+  if [ "$missing" -gt 0 ]; then
+    echo "   ℹ️  Skipped $missing subscription(s) the billing account still lists but that no longer"
+    echo "      exist (deleted, disabled or transferred). Nothing to grant."
+  fi
 }
 
 # POC: ARM roles only on chosen subscriptions (not every billed sub, no MG inherit).
