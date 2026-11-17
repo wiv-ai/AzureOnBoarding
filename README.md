@@ -22,7 +22,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 - Azure CLI (`az`), `curl`, `python3`
 - Logged in as a tenant/billing admin with rights to create app registrations, billing exports, and role assignments
 - **User Access Administrator** at tenant level to grant Reservations Reader at `/providers/Microsoft.Capacity` (Entra **Global Administrator** alone is not enough)
-- A billing account visible to the login (EA, MCA, or CSP partner MCA)
+- A billing account visible to the login (EA, MCA, or CSP partner MCA) for partner / direct onboarding. **T2 CSP customer tenants** often have none — the script skips BA setup, grants per-subscription ARM roles, and can attach an existing FOCUS storage account to the Wiv secret
 
 ## Quick start (Cloud Shell)
 
@@ -42,7 +42,7 @@ bash .cloudshell/startup.sh
 3. Follow prompts:
 
 - Pick the **host subscription** (where `rg-wiv` and billing storage live)
-- Paste the **billing account name** from `az billing account list`
+- Paste the **billing account name** from `az billing account list`, or **Enter to skip** when none are listed (customer / T2 CSP tenant). Skipped runs can still grant local subscription ARM roles and accept an existing FOCUS storage account name
 - **MSP / CSP partner:** answer **y** to the **billing export only** prompt (default **y** when the billing account is a `MicrosoftPartnerAgreement`). This skips Reservations Reader, per-subscription ARM roles and the management group; only the billing-account roles and the FOCUS export are set up
 - Optionally answer **y** to the **POC** prompt to grant Reader / Monitoring Reader only on chosen subscription IDs (skips all-billed ARM roles and the management-group step)
 - Otherwise optionally select a **management group** from the numbered list (or **Skip** — new subscriptions will not inherit MG-scoped access)
