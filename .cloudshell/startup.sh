@@ -5,8 +5,12 @@
 # Cost + FOCUS export at BILLING-ACCOUNT scope: one export covers every
 # subscription under the partner/EA/MCA billing account. CSP is supported when
 # the partner login can see that billing account (usually agreementType
-# MicrosoftCustomerAgreement). Customer tenants with no billing account are
-# not supported by this script.
+# MicrosoftCustomerAgreement or MicrosoftPartnerAgreement).
+#
+# Customer / T2 CSP tenants often have no billing account (the BA lives in the
+# partner tenant). In that case the script skips BA roles + FOCUS export create,
+# grants per-subscription ARM roles in this tenant, and asks for an existing
+# FOCUS storage account so the Wiv secret can still use the Blob path.
 #
 # Management group (optional): Reader + Monitoring Reader at MG scope inherit
 # to every subscription under the group, including new ones you place there.
@@ -114,21 +118,29 @@ echo "-------------------------------------------------------------------"
 echo "   Validates a partner/EA/MCA billing account is visible to this login."
 echo "   CSP partners: sign in to the partner tenant that owns the billing account."
 
+BILLING_ACCOUNT_NAME=""
+AGREEMENT=""
 BILLING_TABLE=$(az billing account list --query "[].{Name:name, Agreement:agreementType, Display:displayName}" -o table 2>/dev/null)
 if [ -z "$BILLING_TABLE" ]; then
-  echo "❌ No billing accounts visible to the current login."
-  echo "   This script requires a billing account (EA, MCA, or CSP partner MCA)."
-  echo "   If you are a CSP partner, re-run while logged into the partner tenant"
-  echo "   with billing-account read access (not a customer tenant without a BA)."
-  exit 1
+  echo "⏭️  No billing accounts visible to the current login."
+  echo "   Typical for T2 CSP / customer tenants (the billing account lives in the partner tenant)."
+  echo "   Skipping billing-account roles and FOCUS export create."
+  echo "   CSP partners who need to create the export: re-run in the partner tenant"
+  echo "   that owns the billing account."
+else
+  echo "$BILLING_TABLE"
+  read -p "Paste the Billing account 'Name' to target for cost (or Enter to skip): " BILLING_ACCOUNT_NAME
+  if [ -z "$BILLING_ACCOUNT_NAME" ]; then
+    echo "⏭️  Skipping billing-account setup (no name entered)."
+  else
+    AGREEMENT=$(az billing account list --query "[?name=='${BILLING_ACCOUNT_NAME}'].agreementType | [0]" -o tsv 2>/dev/null)
+    if [ -z "$AGREEMENT" ]; then
+      echo "❌ Could not resolve agreementType for '$BILLING_ACCOUNT_NAME'."
+      exit 1
+    fi
+    echo "   ✅ Billing account validated: $BILLING_ACCOUNT_NAME ($AGREEMENT)"
+  fi
 fi
-
-echo "$BILLING_TABLE"
-read -p "Paste the Billing account 'Name' to target for cost: " BILLING_ACCOUNT_NAME
-[ -z "$BILLING_ACCOUNT_NAME" ] && { echo "❌ Billing account Name is required."; exit 1; }
-AGREEMENT=$(az billing account list --query "[?name=='${BILLING_ACCOUNT_NAME}'].agreementType | [0]" -o tsv 2>/dev/null)
-[ -z "$AGREEMENT" ] && { echo "❌ Could not resolve agreementType for '$BILLING_ACCOUNT_NAME'."; exit 1; }
-echo "   ✅ Billing account validated: $BILLING_ACCOUNT_NAME ($AGREEMENT)"
 
 print_ea_instructions() {
   local guid; guid=$(uuidgen 2>/dev/null || python3 -c "import uuid;print(uuid.uuid4())")
@@ -210,6 +222,7 @@ print(exact or sub)
 }
 
 RUN_SMOKE="n"
+if [ -n "$BILLING_ACCOUNT_NAME" ]; then
 if [ "$AGREEMENT" = "EnterpriseAgreement" ]; then
   echo "🔑 Attempting automatic 'Enrollment Reader' grant to the SP via REST..."
   if grant_billing_role "$BILLING_ACCOUNT_NAME" "$SP_OBJECT_ID" "$TENANT_ID" "Enrollment Reader"; then
@@ -233,6 +246,7 @@ else
   echo "   Supported: EnterpriseAgreement, MicrosoftCustomerAgreement (incl. CSP partner),"
   echo "   MicrosoftPartnerAgreement."
   exit 1
+fi
 fi
 
 # --- Smoke test: query cost AS THE SP at billing-account scope ---
@@ -443,6 +457,27 @@ ensure_billing_storage_security() {
     --output none 2>/dev/null \
     && echo "   ✅ Billing storage hardened (shared-key access disabled)" \
     || echo "   ⚠️  Could not patch billing storage security settings (may need Owner on storage)."
+}
+
+resolve_storage_resource_id() {
+  local id="$1" name="$2" found=""
+  if [ -n "$id" ]; then
+    found=$(az storage account show --ids "$id" --query id -o tsv 2>/dev/null || true)
+    if [ -n "$found" ]; then
+      STORAGE_RESOURCE_ID="$found"
+      STORAGE_ACCOUNT_NAME=$(printf '%s' "$found" | sed 's|.*/storageAccounts/||; s|/.*||')
+      return 0
+    fi
+  fi
+  if [ -n "$name" ]; then
+    found=$(az storage account list --query "[?name=='${name}'].id | [0]" -o tsv 2>/dev/null || true)
+    if [ -n "$found" ]; then
+      STORAGE_RESOURCE_ID="$found"
+      STORAGE_ACCOUNT_NAME="$name"
+      return 0
+    fi
+  fi
+  return 1
 }
 
 # Re-pin subscription context (Cloud Shell can drift after billing REST calls / long pauses).
@@ -802,27 +837,6 @@ if [ -n "$BILLING_ACCOUNT_NAME" ]; then
     fi
   done
 
-  resolve_storage_resource_id() {
-    local id="$1" name="$2" found=""
-    if [ -n "$id" ]; then
-      found=$(az storage account show --ids "$id" --query id -o tsv 2>/dev/null || true)
-      if [ -n "$found" ]; then
-        STORAGE_RESOURCE_ID="$found"
-        STORAGE_ACCOUNT_NAME=$(printf '%s' "$found" | sed 's|.*/storageAccounts/||; s|/.*||')
-        return 0
-      fi
-    fi
-    if [ -n "$name" ]; then
-      found=$(az storage account list --query "[?name=='${name}'].id | [0]" -o tsv 2>/dev/null || true)
-      if [ -n "$found" ]; then
-        STORAGE_RESOURCE_ID="$found"
-        STORAGE_ACCOUNT_NAME="$name"
-        return 0
-      fi
-    fi
-    return 1
-  }
-
   if [ -n "$EXISTING_EXPORT_CHECK" ]; then
     echo "   ✅ FOCUS export '$EXPORT_NAME' already exists on billing account - checking destination storage"
     SKIP_EXPORT_CREATION="true"
@@ -960,7 +974,51 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
   fi
 else
   echo ""
-  echo "⏭️  Skipping billing export (no billing account selected)"
+  echo "⏭️  Skipping billing-account FOCUS export (no billing account for this login)."
+  echo "   Wiv Blob billing needs billing_storage_account on the integration secret."
+  echo "   If a partner/CSP already exports FOCUS into a storage account you can read,"
+  echo "   enter it below. Leave blank to finish without storage fields."
+  echo ""
+
+  echo "🔒 Granting Reader / Monitoring Reader / Cost Management Reader on subscriptions"
+  echo "   visible to this login (customer-tenant / no-BA path)..."
+  az role assignment create \
+    --assignee "$APP_ID" \
+    --role "Cost Management Reader" \
+    --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
+    --only-show-errors 2>/dev/null || true
+  VISIBLE_SUB_IDS=$(az account list --query "[].id" -o tsv 2>/dev/null)
+  if [ -n "$VISIBLE_SUB_IDS" ]; then
+    for sub_id in $VISIBLE_SUB_IDS; do
+      echo "   - $sub_id"
+      grant_subscription_plane_roles "$sub_id"
+    done
+  else
+    echo "   ⚠️  No subscriptions listed for this login; ARM roles skipped."
+  fi
+
+  read -p "   Existing FOCUS billing storage account name (or Enter to skip): " STORAGE_ACCOUNT_NAME
+  if [ -n "$STORAGE_ACCOUNT_NAME" ]; then
+    CONTAINER_NAME="billing-exports"
+    ROOT_FOLDER="billing-data"
+    EXPORT_NAME="WivFocusDailyExport"
+    read -p "   Billing container [$CONTAINER_NAME]: " _container
+    CONTAINER_NAME="${_container:-$CONTAINER_NAME}"
+    read -p "   Billing root folder [$ROOT_FOLDER]: " _root
+    ROOT_FOLDER="${_root:-$ROOT_FOLDER}"
+    read -p "   Billing export name [$EXPORT_NAME]: " _export
+    EXPORT_NAME="${_export:-$EXPORT_NAME}"
+    if resolve_storage_resource_id "${STORAGE_RESOURCE_ID:-}" "$STORAGE_ACCOUNT_NAME"; then
+      BILLING_EXPORT_DEPLOYED="y"
+      ensure_billing_storage_security "$STORAGE_RESOURCE_ID" || true
+      echo "🔐 Granting Storage Blob Data Reader on $STORAGE_ACCOUNT_NAME to the SP..."
+      assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || true
+    else
+      echo "   ⚠️  Could not resolve storage account '$STORAGE_ACCOUNT_NAME' from this login."
+      echo "      Keeping the name in the Wiv JSON; grant Blob Data Reader after access is available."
+      BILLING_EXPORT_DEPLOYED="y"
+    fi
+  fi
 fi
 
 # =====================================================================
@@ -1093,7 +1151,11 @@ fi
 
 # --- Final output ---
 echo ""
-echo "✅ Onboarding Complete (billing-account scope)"
+if [ -n "$BILLING_ACCOUNT_NAME" ]; then
+  echo "✅ Onboarding Complete (billing-account scope)"
+else
+  echo "✅ Onboarding Complete (no billing account — customer / T2 CSP path)"
+fi
 echo "--------------------------------------"
 echo "📄 Tenant ID:           $TENANT_ID"
 echo "📄 App (Client) ID:     $APP_ID"
@@ -1102,23 +1164,25 @@ echo "📄 Host subscription:   $APP_SUBSCRIPTION_ID"
 if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   echo "📄 Billing account:     $BILLING_ACCOUNT_NAME"
   echo "📄 Cost scope:          billingAccounts/$BILLING_ACCOUNT_NAME (${AGREEMENT:-unknown})"
+else
+  echo "📄 Billing account:     (skipped — none visible / not selected)"
 fi
 echo "📄 Management group:    $MG_LABEL"
 if [ "$MSP_BILLING_ONLY" = "y" ]; then
   echo "📄 ARM roles:           skipped (MSP billing-export-only: no per-subscription roles, no Reservations Reader)"
 fi
 if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
-  if [ -z "${STORAGE_RESOURCE_ID:-}" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ]; then
+  if [ -z "${STORAGE_RESOURCE_ID:-}" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ] && [ -n "${RESOURCE_GROUP:-}" ]; then
     STORAGE_RESOURCE_ID="/subscriptions/${APP_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${STORAGE_ACCOUNT_NAME}"
   fi
   echo ""
   echo "📊 FOCUS billing export (blob):"
-  echo "📄 Resource group:      $RESOURCE_GROUP"
+  [ -n "${RESOURCE_GROUP:-}" ] && echo "📄 Resource group:      $RESOURCE_GROUP"
   echo "📄 Storage account:     $STORAGE_ACCOUNT_NAME"
   echo "📄 Storage resource ID: ${STORAGE_RESOURCE_ID:-}"
   echo "📄 Container:           $CONTAINER_NAME"
   echo "📄 Root folder:         $ROOT_FOLDER"
-  echo "📄 Export name:         $EXPORT_NAME (FOCUS, Parquet/Snappy, daily, billing-account scope)"
+  echo "📄 Export name:         $EXPORT_NAME (FOCUS, Parquet/Snappy)"
   echo "📄 Export path:         $ROOT_FOLDER/${EXPORT_NAME}/"
   echo "📄 Billing query:       direct blob (matches Wiv product onboarding)"
 fi
@@ -1131,6 +1195,7 @@ echo "    $CLIENT_SECRET"
 echo ""
 echo "📦 Wiv integration secret (paste into manual Azure integration / share with Wiv):"
 if [ "$BILLING_EXPORT_DEPLOYED" = "y" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ]; then
+  if [ -n "$BILLING_ACCOUNT_NAME" ]; then
   cat <<EOF
 {
   "auth_method": "client_secret",
@@ -1148,6 +1213,24 @@ if [ "$BILLING_EXPORT_DEPLOYED" = "y" ] && [ -n "${STORAGE_ACCOUNT_NAME:-}" ]; t
   "subscription_id": "${APP_SUBSCRIPTION_ID}"
 }
 EOF
+  else
+  cat <<EOF
+{
+  "auth_method": "client_secret",
+  "tenant_id": "${TENANT_ID}",
+  "app_id": "${APP_ID}",
+  "client_secret": "${CLIENT_SECRET}",
+  "sp_object_id": "${SP_OBJECT_ID}",
+  "billing_query_backend": "blob",
+  "billing_storage_account": "${STORAGE_ACCOUNT_NAME}",
+  "billing_storage_resource_id": "${STORAGE_RESOURCE_ID}",
+  "billing_container": "${CONTAINER_NAME}",
+  "billing_root_folder": "${ROOT_FOLDER}",
+  "billing_export_name": "${EXPORT_NAME}",
+  "subscription_id": "${APP_SUBSCRIPTION_ID}"
+}
+EOF
+  fi
 else
   cat <<EOF
 {
@@ -1156,10 +1239,9 @@ else
   "app_id": "${APP_ID}",
   "client_secret": "${CLIENT_SECRET}",
   "sp_object_id": "${SP_OBJECT_ID}",
-  "billing_account_name": "${BILLING_ACCOUNT_NAME}",
   "billing_query_backend": "blob",
   "subscription_id": "${APP_SUBSCRIPTION_ID}"
 }
 EOF
-  echo "   (billing storage / export fields omitted — FOCUS export was not deployed in this run)"
+  echo "   (billing storage / export fields omitted — set billing_storage_account in Wiv before AZURE-003)"
 fi
