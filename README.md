@@ -22,7 +22,7 @@ Synapse is **not** part of this flow. Legacy Synapse scripts remain in the repo 
 - Azure CLI (`az`), `curl`, `python3`
 - Logged in as a tenant/billing admin with rights to create app registrations, billing exports, and role assignments
 - **User Access Administrator** at tenant level to grant Reservations Reader at `/providers/Microsoft.Capacity` (Entra **Global Administrator** alone is not enough)
-- A billing account visible to the login (EA, MCA, or CSP partner MCA) for partner / direct onboarding. **T2 CSP customer tenants** often have none — the script skips BA setup, grants per-subscription ARM roles, and can attach an existing FOCUS storage account to the Wiv secret
+- A billing account visible to the login (EA, MCA, or CSP partner MCA) for partner / direct onboarding. **T2 CSP customer tenants** often have none — the script skips BA setup and creates one FOCUS export per visible subscription into a new storage account (`billing_scan_all_exports`)
 
 ## Quick start (Cloud Shell)
 

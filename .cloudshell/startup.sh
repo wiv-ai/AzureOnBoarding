@@ -8,9 +8,10 @@
 # MicrosoftCustomerAgreement or MicrosoftPartnerAgreement).
 #
 # Customer / T2 CSP tenants often have no billing account (the BA lives in the
-# partner tenant). In that case the script skips BA roles + FOCUS export create,
-# grants per-subscription ARM roles in this tenant, and asks for an existing
-# FOCUS storage account so the Wiv secret can still use the Blob path.
+# partner tenant). In that case the script skips BA roles and creates FOCUS
+# exports at subscription scope (one per visible subscription) into one storage
+# account. Wiv reads them with billing_scan_all_exports. Management-group scope
+# does not support FOCUS.
 #
 # Management group (optional): Reader + Monitoring Reader at MG scope inherit
 # to every subscription under the group, including new ones you place there.
@@ -716,6 +717,7 @@ EOF
 # FOCUS billing export at billing-account scope (direct blob)
 # =====================================================================
 BILLING_EXPORT_DEPLOYED="n"
+SCAN_ALL_EXPORTS="false"
 RESOURCE_GROUP=""
 STORAGE_ACCOUNT_NAME=""
 CONTAINER_NAME=""
@@ -974,49 +976,114 @@ print(p.get('dataOverwriteBehavior') or str(p.get('definition', {}).get('dataSet
   fi
 else
   echo ""
-  echo "⏭️  Skipping billing-account FOCUS export (no billing account for this login)."
-  echo "   Wiv Blob billing needs billing_storage_account on the integration secret."
-  echo "   If a partner/CSP already exports FOCUS into a storage account you can read,"
-  echo "   enter it below. Leave blank to finish without storage fields."
+  echo "📊 FOCUS billing export (subscription scope — no billing account)"
+  echo "---------------------------------------------------"
+  echo "   This login has no billing account, so a billing-account FOCUS export"
+  echo "   cannot be created. FOCUS is not supported at management-group scope."
+  echo "   Creating one storage account and one FOCUS export per visible subscription."
+  echo "   Parquet lands under billing-data/<subscription-id>/ for Wiv scan-all."
   echo ""
 
   echo "🔒 Granting Reader / Monitoring Reader / Cost Management Reader on subscriptions"
   echo "   visible to this login (customer-tenant / no-BA path)..."
-  az role assignment create \
-    --assignee "$APP_ID" \
-    --role "Cost Management Reader" \
-    --scope "/subscriptions/${APP_SUBSCRIPTION_ID}" \
-    --only-show-errors 2>/dev/null || true
-  VISIBLE_SUB_IDS=$(az account list --query "[].id" -o tsv 2>/dev/null)
+  VISIBLE_SUB_IDS=$(az account list --query "[?state=='Enabled'].id" -o tsv 2>/dev/null)
   if [ -n "$VISIBLE_SUB_IDS" ]; then
     for sub_id in $VISIBLE_SUB_IDS; do
       echo "   - $sub_id"
       grant_subscription_plane_roles "$sub_id"
     done
   else
-    echo "   ⚠️  No subscriptions listed for this login; ARM roles skipped."
+    echo "   ⚠️  No enabled subscriptions listed for this login."
   fi
 
-  read -p "   Existing FOCUS billing storage account name (or Enter to skip): " STORAGE_ACCOUNT_NAME
-  if [ -n "$STORAGE_ACCOUNT_NAME" ]; then
+  if ! ensure_app_subscription; then
+    echo "   ⚠️  Skipping FOCUS export create (fix subscription context and re-run)"
+  elif [ -z "$VISIBLE_SUB_IDS" ]; then
+    echo "   ⚠️  Skipping FOCUS export create (no subscriptions)."
+  else
+    RESOURCE_GROUP="rg-wiv"
     CONTAINER_NAME="billing-exports"
     ROOT_FOLDER="billing-data"
     EXPORT_NAME="WivFocusDailyExport"
-    read -p "   Billing container [$CONTAINER_NAME]: " _container
-    CONTAINER_NAME="${_container:-$CONTAINER_NAME}"
-    read -p "   Billing root folder [$ROOT_FOLDER]: " _root
-    ROOT_FOLDER="${_root:-$ROOT_FOLDER}"
-    read -p "   Billing export name [$EXPORT_NAME]: " _export
-    EXPORT_NAME="${_export:-$EXPORT_NAME}"
-    if resolve_storage_resource_id "${STORAGE_RESOURCE_ID:-}" "$STORAGE_ACCOUNT_NAME"; then
-      BILLING_EXPORT_DEPLOYED="y"
-      ensure_billing_storage_security "$STORAGE_RESOURCE_ID" || true
-      echo "🔐 Granting Storage Blob Data Reader on $STORAGE_ACCOUNT_NAME to the SP..."
-      assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || true
+    UNIQUE_SUFFIX=$(date +%s | tail -c 6)
+    SCAN_ALL_EXPORTS="true"
+
+    if az group show --name "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" >/dev/null 2>&1; then
+      AZURE_REGION=$(az group show --name "$RESOURCE_GROUP" --subscription "$APP_SUBSCRIPTION_ID" --query location -o tsv)
+      echo "   Using existing resource group '$RESOURCE_GROUP' in $AZURE_REGION"
     else
-      echo "   ⚠️  Could not resolve storage account '$STORAGE_ACCOUNT_NAME' from this login."
-      echo "      Keeping the name in the Wiv JSON; grant Blob Data Reader after access is available."
-      BILLING_EXPORT_DEPLOYED="y"
+      read -p "   Azure region for rg-wiv [northeurope]: " AZURE_REGION
+      AZURE_REGION="${AZURE_REGION:-northeurope}"
+      echo "   Creating resource group '$RESOURCE_GROUP' in $AZURE_REGION..."
+      az group create --name "$RESOURCE_GROUP" --location "$AZURE_REGION" --subscription "$APP_SUBSCRIPTION_ID" --only-show-errors \
+        && echo "   ✅ Resource group ready" \
+        || echo "   ❌ Could not create resource group in subscription $APP_SUBSCRIPTION_ID"
+    fi
+
+    ensure_resource_provider "Microsoft.Storage" || echo "   ⚠️  Microsoft.Storage registration incomplete"
+    ensure_resource_provider "Microsoft.CostManagementExports" || echo "   ⚠️  Microsoft.CostManagementExports registration incomplete"
+
+    STORAGE_ACCOUNT_NAME="wivbill${UNIQUE_SUFFIX}"
+    create_storage_account "$STORAGE_ACCOUNT_NAME" "$RESOURCE_GROUP" "$AZURE_REGION" "false" || \
+      echo "   ❌ Billing storage account setup failed"
+    STORAGE_RESOURCE_ID=$(az storage account show \
+      --name "$STORAGE_ACCOUNT_NAME" \
+      --resource-group "$RESOURCE_GROUP" \
+      --query id -o tsv 2>/dev/null)
+
+    if [ -n "$STORAGE_RESOURCE_ID" ]; then
+      az storage container create \
+        --name "$CONTAINER_NAME" \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --auth-mode login \
+        --only-show-errors >/dev/null 2>&1 || true
+      ensure_billing_storage_security "$STORAGE_RESOURCE_ID" || true
+      assign_role_with_retry "$SP_OBJECT_ID" "Storage Blob Data Reader" "$STORAGE_RESOURCE_ID" || true
+
+      if date --version >/dev/null 2>&1; then
+        EXPORT_FROM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        EXPORT_TO=$(date -u -d "+1 year" +%Y-%m-%dT%H:%M:%SZ)
+      else
+        EXPORT_FROM=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        EXPORT_TO=$(date -u -v +1y +%Y-%m-%dT%H:%M:%SZ)
+      fi
+
+      EXPORT_OK=0
+      for sub_id in $VISIBLE_SUB_IDS; do
+        echo "📊 Creating FOCUS export on subscription $sub_id ..."
+        SAVED_ROOT="$ROOT_FOLDER"
+        ROOT_FOLDER="billing-data/${sub_id}"
+        EXPORT_BODY=$(build_billing_export_body)
+        ROOT_FOLDER="$SAVED_ROOT"
+        SUB_SCOPE="https://management.azure.com/subscriptions/${sub_id}/providers/Microsoft.CostManagement/exports"
+        EXPORT_RESPONSE=$(az rest --method PUT \
+          --uri "${SUB_SCOPE}/${EXPORT_NAME}?api-version=${COST_EXPORT_API_VERSION}" \
+          --body "$EXPORT_BODY" 2>&1) || true
+        if echo "$EXPORT_RESPONSE" | grep -qiE '"name"|"id"'; then
+          EXPORT_OK=$((EXPORT_OK + 1))
+          EXPORT_PRINCIPAL=$(printf '%s' "$EXPORT_RESPONSE" | python3 -c "import sys,json; print((json.load(sys.stdin).get('identity') or {}).get('principalId') or '')" 2>/dev/null || true)
+          if [ -n "$EXPORT_PRINCIPAL" ]; then
+            assign_role_with_retry "$EXPORT_PRINCIPAL" "Storage Blob Data Contributor" "$STORAGE_RESOURCE_ID" || true
+          fi
+          az rest --method POST \
+            --uri "${SUB_SCOPE}/${EXPORT_NAME}/run?api-version=${COST_EXPORT_API_VERSION}" \
+            --output none 2>/dev/null || echo "   Note: immediate run may not be available yet for $sub_id"
+        else
+          echo "   ⚠️  Export create failed for $sub_id: ${EXPORT_RESPONSE:0:240}"
+        fi
+      done
+
+      if [ "$EXPORT_OK" -gt 0 ]; then
+        BILLING_EXPORT_DEPLOYED="y"
+        echo "   ✅ Created $EXPORT_OK subscription-scoped FOCUS export(s)"
+        echo "🔄 Backfilling 12 months on the host subscription only (other subscriptions got MonthToDate)..."
+        trigger_focus_export_backfill \
+          "https://management.azure.com/subscriptions/${APP_SUBSCRIPTION_ID}/providers/Microsoft.CostManagement/exports" \
+          "$EXPORT_NAME" "$FOCUS_EXPORT_BACKFILL_MONTHS"
+      else
+        echo "   ❌ No subscription FOCUS exports were created."
+        echo "      Your login needs Cost Management export rights (Owner or Contributor) on each subscription."
+      fi
     fi
   fi
 fi
@@ -1183,7 +1250,11 @@ if [ "$BILLING_EXPORT_DEPLOYED" = "y" ]; then
   echo "📄 Container:           $CONTAINER_NAME"
   echo "📄 Root folder:         $ROOT_FOLDER"
   echo "📄 Export name:         $EXPORT_NAME (FOCUS, Parquet/Snappy)"
-  echo "📄 Export path:         $ROOT_FOLDER/${EXPORT_NAME}/"
+  if [ "$SCAN_ALL_EXPORTS" = "true" ]; then
+    echo "📄 Export path:         $ROOT_FOLDER/<subscription-id>/$EXPORT_NAME/ (scan all)"
+  else
+    echo "📄 Export path:         $ROOT_FOLDER/${EXPORT_NAME}/"
+  fi
   echo "📄 Billing query:       direct blob (matches Wiv product onboarding)"
 fi
 
@@ -1227,6 +1298,7 @@ EOF
   "billing_container": "${CONTAINER_NAME}",
   "billing_root_folder": "${ROOT_FOLDER}",
   "billing_export_name": "${EXPORT_NAME}",
+  "billing_scan_all_exports": true,
   "subscription_id": "${APP_SUBSCRIPTION_ID}"
 }
 EOF
