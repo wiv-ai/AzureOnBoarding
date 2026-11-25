@@ -332,8 +332,10 @@ grant_reservations_reader() {
     return 0
   fi
   echo "   ❌ Could not assign Reservations Reader at /providers/Microsoft.Capacity."
-  echo "      Enable Access management for Azure resources (User Access Administrator at tenant level),"
-  echo "      then re-run this onboarding script. Do not assign the role by hand."
+  echo "      Enable Access management for Azure resources (User Access Administrator at tenant level)"
+  echo "      as a Global Administrator (Entra ID > Properties > Access management for Azure resources),"
+  echo "      or run: az rest --method POST --url \"/providers/Microsoft.Authorization/elevateAccess?api-version=2016-07-01\""
+  echo "      then re-run this onboarding script (it is idempotent). Do not assign the role by hand."
   return 1
 }
 
@@ -995,6 +997,14 @@ else
   else
     echo "   ⚠️  No enabled subscriptions listed for this login."
   fi
+
+  # Reservation orders are tenant-wide (not per-subscription), so the per-subscription
+  # Reader above does not cover Microsoft.Capacity/reservationOrders/reservations/read.
+  # Non-fatal here: a customer-tenant login may not be able to elevate access, and the
+  # cost export below does not depend on it.
+  echo ""
+  grant_reservations_reader || \
+    echo "   ⚠️  Continuing without Reservations Reader; reservation steps will fail with AuthorizationFailed until it is granted."
 
   if ! ensure_app_subscription; then
     echo "   ⚠️  Skipping FOCUS export create (fix subscription context and re-run)"
